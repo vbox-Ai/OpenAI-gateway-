@@ -10,4 +10,9 @@ Pod::Spec.new do |s|
   s.vendored_libraries = 'libagent2api_server.a'
   s.ios.deployment_target = '13.0'
   s.static_framework = true
+  # 关键：dart:ffi 运行时才解析符号，链接期没有任何代码引用它们，
+  # 链接器会把整个 .a dead-strip 掉。必须 force_load 强制完整链入。
+  s.pod_target_xcconfig = {
+    'OTHER_LDFLAGS' => '-Wl,-force_load,$(PODS_TARGET_SRCROOT)/libagent2api_server.a'
+  }
 end
