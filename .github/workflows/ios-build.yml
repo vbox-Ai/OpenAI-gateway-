@@ -89,6 +89,16 @@ jobs:
             installer.pods_project.targets.each do |target|
               flutter_additional_ios_build_settings(target)
             end
+            # 关键：dart:ffi 在运行时才解析 Rust 符号，链接期没有代码引用它们，
+            # 链接器会把整个 .a dead-strip 掉。必须 force_load 强制完整链入。
+            # 用绝对路径写进 Pods-Runner 聚合目标的 OTHER_LDFLAGS，直接作用于最终链接。
+            rust_lib = File.expand_path('../rust/libagent2api_server.a', File.dirname(__FILE__))
+            installer.aggregate_targets.each do |aggregate_target|
+              aggregate_target.xcconfigs.each_value do |xcconfig|
+                existing = xcconfig.attributes['OTHER_LDFLAGS'] || '$(inherited)'
+                xcconfig.attributes['OTHER_LDFLAGS'] = "#{existing} -force_load #{rust_lib}"
+              end
+            end
           end
           RUBYEOF
 
