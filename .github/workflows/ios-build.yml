@@ -47,7 +47,10 @@ jobs:
           mkdir -p mobile-app/rust
           cp target/aarch64-apple-ios/release/libagent2api_server.a mobile-app/rust/
           cat > mobile-app/ios/Podfile <<'RUBYEOF'
-          platform :ios, '13.0'
+          # 注意：不能用过低的 platform —— 当前 Flutter 3.47 的 Flutter pod
+          # 要求更高的最低部署目标，13.0 会触发 "required a higher minimum
+          # deployment target" 错误。
+          platform :ios, '15.0'
 
           ENV['COCOAPODS_DISABLE_STATS'] = 'true'
 
