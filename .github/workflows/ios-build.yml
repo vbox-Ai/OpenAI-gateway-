@@ -94,6 +94,35 @@ jobs:
           end
           RUBYEOF
 
+      - name: 注入 Rust 符号引用（防 dead-strip）
+        run: |
+          # 用 Swift @_silgen_name 引用 Rust 符号，在链接期产生 undefined reference，
+          # 强制链接器把 .a 里的对象文件（含级联的整个 server）拉进来。
+          cat > mobile-app/ios/Runner/AppDelegate.swift <<'SWIFTEOF'
+          import Flutter
+          import UIKit
+
+          // 引用 Rust 静态库符号（dart:ffi 运行时才 lookup，链接期必须显式引用）
+          @_silgen_name("agent2api_server_ping")
+          func agent2api_server_ping() -> Int32
+
+          @_silgen_name("agent2api_server_start")
+          func agent2api_server_start(_ dir: UnsafePointer<CChar>, _ port: UInt16) -> Int32
+
+          @main
+          @objc class AppDelegate: FlutterAppDelegate {
+            override func application(
+              _ application: UIApplication,
+              didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
+            ) -> Bool {
+              // 调用一次，确保链接器解析 Rust 符号（返回 42，无副作用）
+              _ = agent2api_server_ping()
+              GeneratedPluginRegistrant.register(with: self)
+              return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+            }
+          }
+          SWIFTEOF
+
       - name: 准备依赖（pub get + pod install）
         run: |
           cd mobile-app
