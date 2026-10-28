@@ -1,0 +1,80 @@
+name: iOS IPA 构建
+
+# 从网关静态库到可安装 .ipa 的完整流水线（跑在 macOS runner 上）。
+#
+# 链路：cargo build .a → flutter create 平台壳 → 链接 .a（CocoaPods vendored）
+#       → flutter build ios --no-codesign → 打包 Payload → .ipa
+#
+# 签名：默认不签名（--no-codesign）。越狱机用 ldid -S 假签名即可安装；
+#       不上架、不需要 Apple Developer 证书。
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-ipa:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust（含 iOS 目标）
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: 安装 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: 构建网关静态库（iOS arm64）
+        run: |
+          cd desktop-tauri/src-tauri/server
+          cargo build --release --target aarch64-apple-ios --lib
+
+      - name: 生成 Flutter 平台壳
+        run: |
+          cd mobile-app
+          flutter create . --org com.vbox --project-name agent2api_mobile --platforms ios --no-pub
+
+      - name: 恢复提交的源码 + 链接静态库 + 注入 Pod 依赖
+        run: |
+          # flutter create 可能覆盖 pubspec / lib，恢复仓库提交的版本
+          git checkout HEAD -- mobile-app/pubspec.yaml mobile-app/lib mobile-app/rust
+          # 把 .a 拷进 rust/（podspec 的 vendored_libraries 按此路径找）
+          mkdir -p mobile-app/rust
+          cp target/aarch64-apple-ios/release/libagent2api_server.a mobile-app/rust/
+          # 在 Podfile 的 target 'Runner' 里注入 pod 依赖
+          python3 - <<'PYEOF'
+          p = 'mobile-app/ios/Podfile'
+          s = open(p, encoding='utf-8').read()
+          anchor = "  flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))\n"
+          pod_line = "  pod 'Agent2ApiCore', :path => '../rust'\n"
+          if anchor in s and "Agent2ApiCore" not in s:
+              s = s.replace(anchor, anchor + pod_line)
+              open(p, 'w', encoding='utf-8').write(s)
+              print("Pod 依赖已注入")
+          else:
+              print("Pod 依赖跳过（已存在或锚点缺失）")
+          PYEOF
+
+      - name: 构建 iOS App（无签名）
+        run: |
+          cd mobile-app
+          flutter build ios --no-codesign --release
+
+      - name: 打包 IPA
+        run: |
+          cd mobile-app/build/ios/iphoneos
+          mkdir -p Payload
+          cp -r Runner.app Payload/
+          zip -qry agent2api-mobile.ipa Payload
+          ls -lh agent2api-mobile.ipa
+
+      - name: 上传 IPA 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent2api-mobile-ios
+          path: mobile-app/build/ios/iphoneos/agent2api-mobile.ipa
+          if-no-files-found: error
