@@ -2,11 +2,14 @@ name: iOS IPA 构建
 
 # 从网关静态库到可安装 .ipa 的完整流水线（跑在 macOS runner 上）。
 #
-# 链路：cargo build .a → flutter create 平台壳 → 链接 .a（CocoaPods vendored）
-#       → flutter build ios --no-codesign → 打包 Payload → .ipa
+# 链路：cargo build .a → flutter create 平台壳 → 链接 .a（Ruby 直改
+#       Runner.xcodeproj 的 OTHER_LDFLAGS + force_load）→ flutter build ios
+#       --no-codesign → 打包 Payload → .ipa
 #
-# 签名：默认不签名（--no-codesign）。越狱机用 ldid -S 假签名即可安装；
-#       不上架、不需要 Apple Developer 证书。
+# 关键：dart:ffi 运行时才解析 Rust 符号，链接期没有代码引用，链接器会 dead-strip
+#       整个 .a，必须 -force_load 强制完整链入。
+#
+# 签名：默认不签名（--no-codesign）。越狱机用 ldid -S 假签名即可安装。
 
 on:
   workflow_dispatch:
@@ -38,14 +41,11 @@ jobs:
           cd mobile-app
           flutter create . --org com.vbox --project-name agent2api_mobile --platforms ios --no-pub
 
-      - name: 恢复源码 + 链接静态库 + 生成 Podfile
+      - name: 恢复源码 + 拷贝静态库 + 生成 Podfile
         run: |
-          # flutter create 可能覆盖 pubspec / lib，恢复仓库提交的版本
           git checkout HEAD -- mobile-app/pubspec.yaml mobile-app/lib mobile-app/rust
-          # 把 .a 拷进 rust/（podspec 的 vendored_libraries 按此路径找）
           mkdir -p mobile-app/rust
           cp target/aarch64-apple-ios/release/libagent2api_server.a mobile-app/rust/
-          # flutter create 不生成 Podfile，这里直接写出带 pod 依赖的完整 Podfile
           cat > mobile-app/ios/Podfile <<'RUBYEOF'
           platform :ios, '13.0'
 
@@ -78,7 +78,6 @@ jobs:
             use_modular_headers!
 
             flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
-            pod 'Agent2ApiCore', :path => '../rust'
 
             target 'RunnerTests' do
               inherit! :search_paths
@@ -89,18 +88,34 @@ jobs:
             installer.pods_project.targets.each do |target|
               flutter_additional_ios_build_settings(target)
             end
-            # 关键：dart:ffi 在运行时才解析 Rust 符号，链接期没有代码引用它们，
-            # 链接器会把整个 .a dead-strip 掉。必须 force_load 强制完整链入。
-            # 用绝对路径写进 Pods-Runner 聚合目标的 OTHER_LDFLAGS，直接作用于最终链接。
-            rust_lib = File.expand_path('../rust/libagent2api_server.a', File.dirname(__FILE__))
-            installer.aggregate_targets.each do |aggregate_target|
-              aggregate_target.xcconfigs.each_value do |xcconfig|
-                existing = xcconfig.attributes['OTHER_LDFLAGS'] || '$(inherited)'
-                xcconfig.attributes['OTHER_LDFLAGS'] = "#{existing} -force_load #{rust_lib}"
-              end
-            end
           end
           RUBYEOF
+
+      - name: 准备依赖（pub get + pod install）
+        run: |
+          cd mobile-app
+          flutter pub get
+          cd ios
+          pod install
+          cd ..
+
+      - name: 强制链接 Rust 静态库（直改 Runner.xcodeproj）
+        run: |
+          ruby -e "
+            require 'xcodeproj'
+            project = Xcodeproj::Project.open('mobile-app/ios/Runner.xcodeproj')
+            rust_lib = File.expand_path('mobile-app/rust/libagent2api_server.a')
+            project.targets.each do |t|
+              next unless t.name == 'Runner'
+              t.build_configurations.each do |c|
+                base = c.build_settings['OTHER_LDFLAGS']
+                base = '\$(inherited)' if base.nil? || base.empty?
+                c.build_settings['OTHER_LDFLAGS'] = base + ' -force_load ' + rust_lib
+              end
+            end
+            project.save
+            puts 'force_load injected into Runner OTHER_LDFLAGS'
+          "
 
       - name: 构建 iOS App（无签名）
         run: |
@@ -110,6 +125,7 @@ jobs:
       - name: 打包 IPA
         run: |
           cd mobile-app/build/ios/iphoneos
+          du -sh Runner.app
           mkdir -p Payload
           cp -r Runner.app Payload/
           zip -qry agent2api-mobile.ipa Payload
