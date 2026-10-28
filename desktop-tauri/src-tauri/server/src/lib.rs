@@ -59,3 +59,12 @@ fn global_runtime() -> &'static Runtime {
             .expect("创建后台 Tokio 运行时失败")
     })
 }
+
+/// 移动端嵌入入口探活：仅证明静态库可链接、符号可被 FFI 调用。
+/// 真正的服务器启动入口（run_headless）在后续步骤补充 —— 那一步会把
+/// `src/bin/agent2api-server.rs` 的 bootstrap / set_ui_dir / start 时序
+/// 抽成库函数，接受 data_dir / host / port / ui_dir 参数。
+#[no_mangle]
+pub extern "C" fn agent2api_server_ping() -> i32 {
+    42
+}

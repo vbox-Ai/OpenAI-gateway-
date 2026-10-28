@@ -27,6 +27,9 @@ homepage = "https://github.com/aimod-cc/agent2api"
 [lib]
 name = "agent2api_server"
 path = "src/lib.rs"
+# staticlib：供移动端（iOS/Android）把整个网关作为静态库链接进 Flutter 进程内；
+# rlib：桌面端 / headless 二进制继续以 Rust 库形态复用同一份代码。
+crate-type = ["staticlib", "rlib"]
 
 [[bin]]
 name = "agent2api-server"
