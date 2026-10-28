@@ -38,26 +38,59 @@ jobs:
           cd mobile-app
           flutter create . --org com.vbox --project-name agent2api_mobile --platforms ios --no-pub
 
-      - name: 恢复提交的源码 + 链接静态库 + 注入 Pod 依赖
+      - name: 恢复源码 + 链接静态库 + 生成 Podfile
         run: |
           # flutter create 可能覆盖 pubspec / lib，恢复仓库提交的版本
           git checkout HEAD -- mobile-app/pubspec.yaml mobile-app/lib mobile-app/rust
           # 把 .a 拷进 rust/（podspec 的 vendored_libraries 按此路径找）
           mkdir -p mobile-app/rust
           cp target/aarch64-apple-ios/release/libagent2api_server.a mobile-app/rust/
-          # 在 Podfile 的 target 'Runner' 里注入 pod 依赖
-          python3 - <<'PYEOF'
-          p = 'mobile-app/ios/Podfile'
-          s = open(p, encoding='utf-8').read()
-          anchor = "  flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))\n"
-          pod_line = "  pod 'Agent2ApiCore', :path => '../rust'\n"
-          if anchor in s and "Agent2ApiCore" not in s:
-              s = s.replace(anchor, anchor + pod_line)
-              open(p, 'w', encoding='utf-8').write(s)
-              print("Pod 依赖已注入")
-          else:
-              print("Pod 依赖跳过（已存在或锚点缺失）")
-          PYEOF
+          # flutter create 不生成 Podfile，这里直接写出带 pod 依赖的完整 Podfile
+          cat > mobile-app/ios/Podfile <<'RUBYEOF'
+          platform :ios, '13.0'
+
+          ENV['COCOAPODS_DISABLE_STATS'] = 'true'
+
+          project 'Runner', {
+            'Debug' => :debug,
+            'Profile' => :release,
+            'Release' => :release,
+          }
+
+          def flutter_root
+            generated_xcode_build_settings_path = File.expand_path(File.join('..', 'Flutter', 'Generated.xcconfig'), __FILE__)
+            unless File.exist?(generated_xcode_build_settings_path)
+              raise "#{generated_xcode_build_settings_path} must exist. If you're running pod install manually, make sure flutter pub get is executed first"
+            end
+            File.foreach(generated_xcode_build_settings_path) do |line|
+              matches = line.match(/FLUTTER_ROOT\=(.*)/)
+              return matches[1].strip if matches
+            end
+            raise "FLUTTER_ROOT not found in #{generated_xcode_build_settings_path}"
+          end
+
+          require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelper'), flutter_root)
+
+          flutter_ios_podfile_setup
+
+          target 'Runner' do
+            use_frameworks!
+            use_modular_headers!
+
+            flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
+            pod 'Agent2ApiCore', :path => '../rust'
+
+            target 'RunnerTests' do
+              inherit! :search_paths
+            end
+          end
+
+          post_install do |installer|
+            installer.pods_project.targets.each do |target|
+              flutter_additional_ios_build_settings(target)
+            end
+          end
+          RUBYEOF
 
       - name: 构建 iOS App（无签名）
         run: |
