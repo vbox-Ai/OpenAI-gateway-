@@ -30,7 +30,7 @@ pub mod server;
 pub mod web_shim;
 
 use std::future::Future;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use tokio::runtime::{Handle, Runtime};
 
@@ -58,4 +58,94 @@ fn global_runtime() -> &'static Runtime {
             .build()
             .expect("创建后台 Tokio 运行时失败")
     })
+}
+
+/// 服务器停机句柄：`server::start` 返回的 oneshot Sender **一旦被 drop 就等于
+/// 发出停机信号**（见 `server::start` 里的 `shutdown_rx.await`）。嵌入形态下
+/// 必须把它存进静态槽位，否则 `run_headless` 一返回，局部变量出作用域，
+/// 服务器刚起来就停 —— 表现就是 App 显示「服务已启动」但 webview 白屏。
+static SHUTDOWN: Mutex<Option<tokio::sync::oneshot::Sender<()>>> = Mutex::new(None);
+
+/// 移动端嵌入入口探活：仅证明静态库可链接、符号可被 FFI 调用。
+#[no_mangle]
+pub extern "C" fn agent2api_server_ping() -> i32 {
+    42
+}
+
+/// 移动端嵌入的服务器启动入口：在**本进程内**把网关 headless 服务器跑起来。
+///
+/// 与 `src/bin/agent2api-server.rs` 的 main() 同一条时序，差别只有两处：
+///   · 绑回环（127.0.0.1），语义与桌面壳一致 —— 不做网络部署那套
+///     panel_gate / v1_fail_closed 闸门；
+///   · 不 block_on 等停机信号 —— 服务器由惰性全局运行时承接，函数返回后
+///     继续在后台跑；停机交给 FFI 侧显式调用（`agent2api_server_stop`）。
+///
+/// `data_dir` 即配置目录（桌面等价物是 `AGENT2API_PROXY_HOME`，默认
+/// `~/.agent2api`）；移动端传 App 的沙盒 Documents 目录。
+/// UI 目录约定为 `{data_dir}/ui/`（由 Flutter 侧在启动前把网关 Web UI 拷进去）。
+pub fn run_headless(data_dir: &str, port: u16) -> Result<(), String> {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    // 让既有 env 读取路径（paths::config_dir 等）统一落到移动端数据目录
+    std::env::set_var("AGENT2API_PROXY_HOME", data_dir);
+
+    let host = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let mut state = server::ServerState::bootstrap(port, host)?;
+    state.set_ui_dir(std::path::PathBuf::from(data_dir).join("ui"));
+
+    // 面板访问控制：回环形态不设闸门（与桌面一致），但库句柄与令牌载入照常
+    server::access::attach_db(state.db().cloned());
+    server::access::load_refresh_tokens();
+    server::access::load_access_tokens();
+    server::access::sync_env_admin_to_store();
+
+    let shutdown = server::start(&state).map_err(|conflict| conflict.message)?;
+
+    // 句柄必须长期持有：drop 即停机（见 SHUTDOWN 的注释）。
+    // 重复调用 start 时先放掉旧句柄，避免泄漏的同时让新实例接管。
+    match SHUTDOWN.lock() {
+        Ok(mut slot) => *slot = Some(shutdown),
+        Err(_) => {
+            std::mem::forget(shutdown);
+            return Err("停机句柄槽位已中毒".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// FFI 包装：请求停机（幂等）。返回 0 表示已发出停机信号。
+#[no_mangle]
+pub extern "C" fn agent2api_server_stop() -> i32 {
+    match SHUTDOWN.lock() {
+        Ok(mut slot) => match slot.take() {
+            Some(tx) => {
+                let _ = tx.send(());
+                0
+            }
+            None => 1,
+        },
+        Err(_) => 2,
+    }
+}
+
+/// FFI 包装：从 Flutter 调用，返回 0 表示启动成功，非 0 表示失败。
+/// `data_dir` 为 C 字符串（UTF-8），`port` 为监听端口。
+#[no_mangle]
+pub extern "C" fn agent2api_server_start(
+    data_dir: *const std::os::raw::c_char,
+    port: u16,
+) -> i32 {
+    let dir = unsafe {
+        if data_dir.is_null() {
+            return 1;
+        }
+        match std::ffi::CStr::from_ptr(data_dir).to_str() {
+            Ok(s) => s.to_string(),
+            Err(_) => return 2,
+        }
+    };
+    match run_headless(&dir, port) {
+        Ok(()) => 0,
+        Err(_) => 3,
+    }
 }

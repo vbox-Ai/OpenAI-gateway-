@@ -1,0 +1,228 @@
+name: iOS 构建与发布
+
+# 单一工作流：cargo 构建网关 .a → flutter 平台壳 → 链接 .a（force_load + -u 防
+# dead-strip）→ xcodebuild 出 Runner.app → 打包裸 .ipa → 上传 Releases。
+#
+# 触发：手动（workflow_dispatch）。产物：
+#   - Releases 里的裸 agent2api-mobile.ipa（可直接 ldid 签名安装）
+#   - Actions Artifacts 里的备份（zip）
+#
+# 签名：默认不签名。越狱机用 ldid -S 假签名即可装，不上架、不需要 Apple 证书。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-ipa:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust（含 iOS 目标）
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: 安装 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: 构建网关静态库（iOS arm64）
+        run: |
+          cd desktop-tauri/src-tauri/server
+          cargo build --release --target aarch64-apple-ios --lib
+
+      - name: 生成 Flutter 平台壳
+        run: |
+          cd mobile-app
+          flutter create . --org com.vbox --project-name agent2api_mobile --platforms ios --no-pub
+
+      - name: 恢复源码 + 拷贝静态库 + 生成 Podfile
+        run: |
+          git checkout HEAD -- mobile-app/pubspec.yaml mobile-app/lib mobile-app/rust
+          mkdir -p mobile-app/rust
+          cp target/aarch64-apple-ios/release/libagent2api_server.a mobile-app/rust/
+          cat > mobile-app/ios/Podfile <<'RUBYEOF'
+          # Flutter 3.47 的 Flutter pod 要求更高的最低部署目标，13.0 会报错
+          platform :ios, '15.0'
+
+          ENV['COCOAPODS_DISABLE_STATS'] = 'true'
+
+          project 'Runner', {
+            'Debug' => :debug,
+            'Profile' => :release,
+            'Release' => :release,
+          }
+
+          def flutter_root
+            generated_xcode_build_settings_path = File.expand_path(File.join('..', 'Flutter', 'Generated.xcconfig'), __FILE__)
+            unless File.exist?(generated_xcode_build_settings_path)
+              raise "#{generated_xcode_build_settings_path} must exist. If you're running pod install manually, make sure flutter pub get is executed first"
+            end
+            File.foreach(generated_xcode_build_settings_path) do |line|
+              matches = line.match(/FLUTTER_ROOT\=(.*)/)
+              return matches[1].strip if matches
+            end
+            raise "FLUTTER_ROOT not found in #{generated_xcode_build_settings_path}"
+          end
+
+          require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelper'), flutter_root)
+
+          flutter_ios_podfile_setup
+
+          target 'Runner' do
+            use_frameworks!
+            use_modular_headers!
+
+            flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
+
+            target 'RunnerTests' do
+              inherit! :search_paths
+            end
+          end
+
+          post_install do |installer|
+            installer.pods_project.targets.each do |target|
+              flutter_additional_ios_build_settings(target)
+            end
+          end
+          RUBYEOF
+
+      - name: 打包 Web UI + 注入 ATS 放行本地回环
+        run: |
+          # 打包网关 Web UI（静态文件）为单个 zip 资产，运行时解压到 {Documents}/ui/
+          mkdir -p mobile-app/assets
+          ( cd desktop-tauri/ui && zip -qry ../../mobile-app/assets/ui.zip . )
+          ls -lh mobile-app/assets/ui.zip
+          # ATS：放行本地回环 HTTP（webview 加载 http://127.0.0.1:3065 会被默认拦截）
+          python3 - <<'PYEOF'
+          import plistlib
+          p = 'mobile-app/ios/Runner/Info.plist'
+          with open(p, 'rb') as f:
+              data = plistlib.load(f)
+          ats = data.setdefault('NSAppTransportSecurity', {})
+          ats['NSAllowsLocalNetworking'] = True
+          ats['NSAllowsArbitraryLoads'] = True
+          # 文件共享：导出（系统事件 / 账号 / 日志）写到 Documents/Exports 后，
+          # 用户在系统「文件」App → 我的 iPhone → 本 App 里能直接看到并拷出
+          data['UIFileSharingEnabled'] = True
+          data['LSSupportsOpeningDocumentsInPlace'] = True
+          with open(p, 'wb') as f:
+              plistlib.dump(data, f)
+          print('ATS + file-sharing injected')
+          PYEOF
+
+      - name: 注入 Rust 符号引用（防 dead-strip）
+        run: |
+          cat > mobile-app/ios/Runner/AppDelegate.swift <<'SWIFTEOF'
+          import Flutter
+          import UIKit
+
+          @_silgen_name("agent2api_server_ping")
+          func agent2api_server_ping() -> Int32
+
+          @_silgen_name("agent2api_server_start")
+          func agent2api_server_start(_ dir: UnsafePointer<CChar>, _ port: UInt16) -> Int32
+
+          @main
+          @objc class AppDelegate: FlutterAppDelegate {
+            override func application(
+              _ application: UIApplication,
+              didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
+            ) -> Bool {
+              _ = agent2api_server_ping()
+              GeneratedPluginRegistrant.register(with: self)
+              return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+            }
+          }
+          SWIFTEOF
+
+      - name: 准备依赖（pub get + pod install）
+        run: |
+          cd mobile-app
+          flutter pub get
+          cd ios
+          pod install
+          cd ..
+
+      - name: 强制链接 Rust 静态库（直改 Runner.xcodeproj）
+        run: |
+          ruby -e "
+            require 'xcodeproj'
+            project = Xcodeproj::Project.open('mobile-app/ios/Runner.xcodeproj')
+            rust_lib = File.expand_path('mobile-app/rust/libagent2api_server.a')
+            project.targets.each do |t|
+              next unless t.name == 'Runner'
+              t.build_configurations.each do |c|
+                base = c.build_settings['OTHER_LDFLAGS']
+                base = '\$(inherited)' if base.nil? || base.empty?
+                # dead_strip 是 section 级消除，force_load 只保证 .a 进入链接，
+                # 必须 -u 把符号标记为未解析引用，强制保留 start 及其级联依赖
+                c.build_settings['OTHER_LDFLAGS'] = base + ' -Wl,-force_load,' + rust_lib + ' -Wl,-u,_agent2api_server_start -Wl,-u,_agent2api_server_stop -Wl,-u,_agent2api_server_ping'
+              end
+            end
+            project.save
+            puts 'force_load + -u injected'
+          "
+
+      - name: 构建 iOS App（xcodebuild 直连，避开 pod 重装重置 OTHER_LDFLAGS）
+        run: |
+          cd mobile-app/ios
+          xcodebuild -workspace Runner.xcworkspace -scheme Runner \
+            -configuration Release -sdk iphoneos \
+            -derivedDataPath ../build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+
+      - name: 校验产物（符号已链接 + Web UI 已打进 bundle）
+        run: |
+          APP=mobile-app/build/Build/Products/Release-iphoneos/Runner.app
+          echo "== 二进制定义的符号 =="
+          nm -gU "$APP/Runner" | grep -E '_agent2api_server_(start|stop|ping)$' || {
+            echo "::error::Rust 符号未链接进 Runner 主二进制（又被 dead_strip 剥掉了）"
+            exit 1
+          }
+          # flutter_assets 在 iOS 上落在 App.framework 里（不同 Flutter 版本位置有别，
+          # 不能写死 Runner.app/flutter_assets），按名字全树找一次。
+          echo "== Web UI 资产 =="
+          UIZIP=$(find "$APP" -name 'ui.zip' | head -n 1)
+          echo "ui.zip -> ${UIZIP:-<missing>}"
+          [ -n "$UIZIP" ] || {
+            echo "::error::assets/ui.zip 未打进 bundle，App 必然白屏"
+            exit 1
+          }
+          unzip -l "$UIZIP" | grep -q 'index.html' || {
+            echo "::error::ui.zip 里没有 index.html"
+            exit 1
+          }
+          unzip -l "$UIZIP" | tail -n 3
+
+      - name: 打包裸 IPA
+        run: |
+          APP=mobile-app/build/Build/Products/Release-iphoneos/Runner.app
+          du -sh "$APP"
+          mkdir -p mobile-app/dist/Payload
+          cp -r "$APP" mobile-app/dist/Payload/
+          ( cd mobile-app/dist && zip -qry agent2api-mobile.ipa Payload && ls -lh agent2api-mobile.ipa )
+
+      - name: 上传 ipa 备份到 Actions Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent2api-mobile-ios
+          path: mobile-app/dist/agent2api-mobile.ipa
+          if-no-files-found: error
+
+      - name: 发布裸 ipa 到 Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete mobile --yes 2>/dev/null || true
+          gh api -X DELETE repos/${{ github.repository }}/git/refs/tags/mobile 2>/dev/null || true
+          gh release create mobile mobile-app/dist/agent2api-mobile.ipa \
+            --title "Agent2API iOS" \
+            --notes "iOS 构建产物：含 Rust 网关整机（18 家 provider + 完整 API + FFI 入口）+ Flutter 壳 + webview。越狱机安装：ldid -S agent2api-mobile.ipa" \
+            --latest

@@ -1,0 +1,29 @@
+name: agent2api_mobile
+description: Agent2API 移动端 —— 复用网关整机（headless server + webview）
+publish_to: 'none'
+version: 0.1.0
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # 手写 dart:ffi 绑定网关静态库（libagent2api_server.a）
+  ffi: ^2.1.0
+  # 复用网关 Web UI：webview 加载本地 headless server（127.0.0.1:3065）
+  flutter_inappwebview: ^6.0.0
+  # 取沙盒 Documents 目录
+  path_provider: ^2.1.3
+  # 解压打包的 Web UI zip
+  archive: ^3.6.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/ui.zip
