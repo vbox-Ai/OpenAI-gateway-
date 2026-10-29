@@ -159,7 +159,13 @@ jobs:
 
       - name: 打包 IPA
         run: |
+          echo "=== .a 大小 ==="
+          ls -lh mobile-app/rust/libagent2api_server.a
+          echo "=== .a 符号检查 ==="
+          nm mobile-app/rust/libagent2api_server.a 2>/dev/null | grep -c "agent2api_server" || echo "NO_SYMBOL_IN_A"
           APP=mobile-app/build/Build/Products/Release-iphoneos/Runner.app
+          echo "=== 二进制符号检查 ==="
+          nm "$APP/Runner" 2>/dev/null | grep -c "agent2api_server" || echo "NO_SYMBOL_IN_BINARY"
           du -sh "$APP"
           mkdir -p mobile-app/dist/Payload
           cp -r "$APP" mobile-app/dist/Payload/
