@@ -1,35 +1,41 @@
-# 阶段 4 记忆点：.ipa 打包流水线（当前状态 + 未解决项）
+# 阶段 4 记忆点：.ipa 打包流水线（已解决！）
 
-## 已跑通
-- `.github/workflows/ios-build.yml`：完整 .ipa 流水线已建立并可运行
-  - cargo build .a → flutter create 平台壳 → 写 Podfile → pub get + pod install
-    → Ruby 改 Runner.xcodeproj OTHER_LDFLAGS → flutter build ios --no-codesign
-    → 打包 Payload → .ipa
-- 产出：`agent2api-mobile-ios`（.ipa，可下载）
-- 两次关键坑已修：
-  - flutter create 不生成 Podfile → 改直接写完整 Podfile
-  - platform :ios, '13.0' 太低 → Flutter 3.47 的 pod 要求更高 → 提到 '15.0'
+## 最终解法（第 10 次迭代成功）
+**根因**：`-dead_strip` 是 **section 级**死代码消除。`-force_load` 只保证整个 .a
+进入链接，但 `run_headless`/整个 server 的 section 在链接期无人引用，仍被裁掉。
+Swift `@_silgen_name` 引用 `agent2api_server_ping` 只保留了 ping 那一个 section
+（ping 是 `return 42`，不引用 server，不会级联）。
 
-## 未解决：Rust 静态库没被链接（dead-strip）
-- 现象：Runner.app 一直 16.8MB（纯 Flutter，无 Rust 50MB），.ipa 6.4MB
-- 根因：dart:ffi 在**运行时**才 `DynamicLibrary.process().lookup('agent2api_server_start')`，
-  链接期没有任何代码引用 Rust 符号 → 链接器把整个 .a dead-strip 掉
-- 尝试过但未生效：
-  1. podspec `pod_target_xcconfig` 的 `-Wl,-force_load,$(PODS_TARGET_SRCROOT)/...` ✗
-  2. Podfile post_install 改 aggregate_targets xcconfig ✗
-  3. Ruby 直改 Runner.xcodeproj OTHER_LDFLAGS `-force_load <abs path>` ✗（脚本确实跑了）
-- 附带警告：`CocoaPods did not set the base configuration ... custom config set`
-  —— 这可能导致 Pods-Runner xcconfig 未被正确 include，CocoaPods 集成可能不完整
+**修复**：在 Runner 目标 OTHER_LDFLAGS 里加：
+```
+-Wl,-force_load,<libagent2api_server.a 绝对路径> \
+-Wl,-u,_agent2api_server_start \
+-Wl,-u,_agent2api_server_ping
+```
+`-u` 把符号标记为「未解析引用」，强制链接器保留该符号及其级联依赖
+（start → run_headless → server::bootstrap/start → 18 家 provider + axum + tokio）。
 
-## 两个待验证的修复方向
-1. **Swift @_silgen_name 引用**（最可靠，不依赖链接器 flag）：
-   在 AppDelegate.swift 里声明 `@_silgen_name("agent2api_server_ping")` 并在启动时引用一次，
-   强制链接器解析该符号 → 连带把 lib.rs 对象文件 + 其引用的整个 server 模块级联拉进来。
-   前提：.a 必须在链接搜索路径里（vendored_libraries pod 或 -l 提供）。
-2. **排查 CocoaPods 集成**：解决 "custom config set" 警告，确认 Pods-Runner xcconfig 被 include，
-   再重新验证 force_load。
+## 结果
+- Runner.app：18MB（纯 Flutter）→ **36MB**（Flutter 18MB + Rust server ~18MB）✓
+- .ipa：6.4MB → **13.18MB** ✓
+- 符号检查：`BIN_HAS_SYMBOL` ✓
 
-## 下一步建议
-- 优先试方向 1（Swift 引用），它在 flutter_rust_bridge 生态里是成熟做法
-- 验证方法：打包后 `nm Runner.app/Runner | grep agent2api_server_start` 应能命中；
-  Runner.app 应从 16.8MB 涨到 ~60MB+
+## 流水线最终形态（ios-build.yml）
+1. cargo build --release --target aarch64-apple-ios --lib → 177MB 的 .a
+2. flutter create . --platforms ios
+3. 写 Podfile（platform :ios 15.0 + flutter_install_all_ios_pods）
+4. 写 AppDelegate.swift（@_silgen_name 引用 ping + start）
+5. flutter pub get + pod install
+6. Ruby 直改 Runner.xcodeproj 的 OTHER_LDFLAGS（force_load + -u）
+7. **xcodebuild 直连**（不用 flutter build ios，避免 pod 重装重置 OTHER_LDFLAGS）
+8. 打包 Payload → .ipa
+
+## 关键坑记录
+1. flutter create 不生成 Podfile → 自己写
+2. platform :ios 13.0 太低 → Flutter 3.47 要求 ≥15.0
+3. flutter build ios 会重跑 pod install 重置 OTHER_LDFLAGS → 改 xcodebuild 直连
+4. force_load 不够（section 级 dead_strip）→ 必须加 -u 强制保留符号
+
+## 下一步
+- 真机验证：装 ipa → ldid -S 假签名 → 启动 → webview 加载 127.0.0.1:3065
+- 打包网关 Web UI 到 Documents/ui/（run_headless 约定 {data_dir}/ui/）
