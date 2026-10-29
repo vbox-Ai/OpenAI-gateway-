@@ -177,20 +177,25 @@ jobs:
       - name: 校验产物（符号已链接 + Web UI 已打进 bundle）
         run: |
           APP=mobile-app/build/Build/Products/Release-iphoneos/Runner.app
-          echo "== 二进制定义的杀器符号 =="
+          echo "== 二进制定义的符号 =="
           nm -gU "$APP/Runner" | grep -E '_agent2api_server_(start|stop|ping)$' || {
             echo "::error::Rust 符号未链接进 Runner 主二进制（又被 dead_strip 剥掉了）"
             exit 1
           }
+          # flutter_assets 在 iOS 上落在 App.framework 里（不同 Flutter 版本位置有别，
+          # 不能写死 Runner.app/flutter_assets），按名字全树找一次。
           echo "== Web UI 资产 =="
-          ls -lh "$APP/flutter_assets/assets/ui.zip" || {
+          UIZIP=$(find "$APP" -name 'ui.zip' | head -n 1)
+          echo "ui.zip -> ${UIZIP:-<missing>}"
+          [ -n "$UIZIP" ] || {
             echo "::error::assets/ui.zip 未打进 bundle，App 必然白屏"
             exit 1
           }
-          unzip -l "$APP/flutter_assets/assets/ui.zip" | grep -q 'index.html' || {
+          unzip -l "$UIZIP" | grep -q 'index.html' || {
             echo "::error::ui.zip 里没有 index.html"
             exit 1
           }
+          unzip -l "$UIZIP" | tail -n 3
 
       - name: 打包裸 IPA
         run: |

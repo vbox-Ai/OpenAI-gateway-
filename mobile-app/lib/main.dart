@@ -141,10 +141,19 @@ class _WebUiPageState extends State<WebUiPage> {
         _failed = true;
         _barVisible = true;
         _stage = '启动失败';
-        _detail = e.toString();
+        _detail = '${e.toString()}\nping=${_safePing()}';
       });
     } finally {
       _busy = false;
+    }
+  }
+
+  /// 探活符号（42 = 静态库已链接）。失败时用于区分「库没链上」与「服务没起来」。
+  String _safePing() {
+    try {
+      return Agent2ApiServer.ping().toString();
+    } catch (e) {
+      return 'symbol-missing';
     }
   }
 
