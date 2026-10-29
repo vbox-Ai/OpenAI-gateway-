@@ -14,7 +14,6 @@
 //! `server::start` 只同步 bind，监听任务是在后台运行时里起的；立刻让 webview
 //! 去请求会拿到 connection refused，WKWebView 就停在白屏且不再重试。
 
-import 'dart:async';
 import 'dart:io';
 
 import 'package:archive/archive_io.dart';
