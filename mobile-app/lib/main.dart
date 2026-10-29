@@ -77,6 +77,89 @@ class _WebUiPageState extends State<WebUiPage> {
 
   bool _busy = false;
 
+  /// 最近一条 JS 错误（页面脚本抛错时贴在底部，点一下消失）
+  String _jsError = '';
+
+  /// webview 句柄（弹窗兜底导航用）
+  InAppWebViewController? _web;
+
+  /// 注入到页面之前的弹窗桥：把 window.open / target=_blank 交给原生打开。
+  ///
+  /// WKWebView 只有在实现 `WKUIDelegate createWebViewWith` 时才支持新窗口，
+  /// 没实现时 `window.open()` 直接返回 null —— web_shim 的登录流程拿不到
+  /// 窗口句柄，授权页永远打不开（点「添加账号」就像点了块石头）。
+  /// 这里返回一个假句柄：给它赋 `location.href` 就等于请原生开浏览器，
+  /// 同时把点击 `target=_blank` 的链接也接管过来。
+  static const String _popupBridgeJs = r'''
+(function () {
+  if (window.__a2aPopupBridge) return;
+  window.__a2aPopupBridge = true;
+
+  function open(url) {
+    if (!url) return;
+    var text = String(url);
+    if (!text || text === 'about:blank') return;
+    try { window.flutter_inappwebview.callHandler('a2aOpen', text); } catch (e) {}
+  }
+
+  window.open = function (url, name, features) {
+    if (url && String(url) !== 'about:blank') open(url);
+    return {
+      closed: false,
+      focus: function () {},
+      blur: function () {},
+      close: function () { this.closed = true; },
+      postMessage: function () {},
+      location: {
+        get href() { return 'about:blank'; },
+        set href(value) { open(value); },
+        assign: function (value) { open(value); },
+        replace: function (value) { open(value); }
+      }
+    };
+  };
+
+  document.addEventListener('click', function (event) {
+    var node = event.target;
+    while (node && node.tagName !== 'A') { node = node.parentNode; }
+    if (!node) return;
+    if (node.target !== '_blank') return;
+    var href = node.getAttribute('href');
+    if (!href) return;
+    event.preventDefault();
+    open(href);
+  }, true);
+
+  // 脚本异常回传：空白页最常见的成因是某个 island 初始化时抛错，
+  // 把消息带回原生贴在底部，下一次就能直接对症。
+  function report(message) {
+    try { window.flutter_inappwebview.callHandler('a2aError', String(message)); } catch (e) {}
+  }
+  window.addEventListener('error', function (event) {
+    var where = (event.filename || '') + (event.lineno ? ':' + event.lineno : '');
+    report('error: ' + (event.message || '') + (where ? ' @ ' + where : ''));
+  });
+  window.addEventListener('unhandledrejection', function (event) {
+    var reason = event.reason;
+    var text = reason && (reason.stack || reason.message) ? (reason.stack || reason.message) : reason;
+    report('rejection: ' + text);
+  });
+})();
+''';
+
+  /// 用系统浏览器（SFSafariViewController）打开授权页。
+  /// 授权页完成后的回调打回 127.0.0.1:3065，本机回环两边共用，
+  /// 网关收到回调，shim 的轮询自然拿到结果。
+  Future<void> _openExternal(String url) async {
+    try {
+      final browser = ChromeSafariBrowser();
+      await browser.open(url: WebUri(url));
+    } catch (_) {
+      // 退路：实在开不了就在当前 webview 里导航（会丢 SPA 状态，但能看见页面）
+      await _web?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -214,34 +297,105 @@ class _WebUiPageState extends State<WebUiPage> {
       backgroundColor: const Color(0xFF0E0F12),
       body: Stack(
         children: [
+          // SafeArea 必须包住 webview：页面根布局是 `.shell { height: 100vh }`，
+          // webview 若与屏幕等大（100vh 含状态栏），内容整体会被顶到状态栏
+          // 底下去 —— 表现就是「整体上移」。收进安全区后 100vh 才等于可见高度。
           Positioned.fill(
-            child: _ready
-                ? InAppWebView(
-                    initialUrlRequest: URLRequest(url: WebUri(kUiUrl)),
-                    initialSettings: InAppWebViewSettings(
-                      javaScriptEnabled: true,
-                      domStorageEnabled: true,
-                      allowsInlineMediaPlayback: true,
-                      mediaPlaybackRequiresUserGesture: false,
-                      supportZoom: false,
-                      transparentBackground: false,
-                    ),
-                    onLoadStop: (controller, url) {
-                      if (!mounted) return;
-                      setState(() => _barVisible = false);
-                    },
-                    onReceivedError: (controller, request, error) {
-                      if (!mounted) return;
-                      setState(() {
-                        _barVisible = true;
-                        _failed = true;
-                        _stage = '页面加载失败';
-                        _detail = '${request.url}\n${error.description}';
-                      });
-                    },
-                  )
-                : _loadingView(),
+            child: SafeArea(
+              child: _ready
+                  ? InAppWebView(
+                      initialUrlRequest: URLRequest(url: WebUri(kUiUrl)),
+                      initialSettings: InAppWebViewSettings(
+                        javaScriptEnabled: true,
+                        domStorageEnabled: true,
+                        allowsInlineMediaPlayback: true,
+                        mediaPlaybackRequiresUserGesture: false,
+                        supportZoom: false,
+                        transparentBackground: false,
+                      ),
+                      onWebViewCreated: (controller) {
+                        _web = controller;
+                        // 弹窗通道：WKWebView 未实现 createWebViewWith 时
+                        // window.open 返回 null，登录授权页根本打不开；
+                        // 这里把 window.open / target=_blank 转成原生浏览器。
+                        controller.addJavaScriptHandler(
+                          handlerName: 'a2aOpen',
+                          callback: (args) {
+                            if (args.isNotEmpty) {
+                              _openExternal(args.first.toString());
+                            }
+                            return null;
+                          },
+                        );
+                        controller.addJavaScriptHandler(
+                          handlerName: 'a2aError',
+                          callback: (args) {
+                            if (args.isEmpty) return null;
+                            final text = args.first.toString();
+                            if (!mounted) return null;
+                            setState(() => _jsError = text.length > 300
+                                ? text.substring(0, 300)
+                                : text);
+                            return null;
+                          },
+                        );
+                        controller.addUserScript(
+                          userScript: UserScript(
+                            source: _popupBridgeJs,
+                            injectionTime:
+                                UserScriptInjectionTime.AT_DOCUMENT_START,
+                            forMainFrameOnly: true,
+                          ),
+                        );
+                      },
+                      onLoadStop: (controller, url) {
+                        if (!mounted) return;
+                        setState(() => _barVisible = false);
+                      },
+                      onConsoleMessage: (controller, message) {
+                        // 不直接比枚举值：不同版本 ConsoleMessageLevel 的大小写
+                        // 有过变化，按字符串判定更稳。
+                        final level =
+                            message.messageLevel.toString().toLowerCase();
+                        if (!level.contains('error')) return;
+                        if (!mounted) return;
+                        final text = message.message.toString();
+                        setState(() => _jsError =
+                            text.length > 300 ? text.substring(0, 300) : text);
+                      },
+                      onReceivedError: (controller, request, error) {
+                        if (!mounted) return;
+                        setState(() {
+                          _barVisible = true;
+                          _failed = true;
+                          _stage = '页面加载失败';
+                          _detail = '${request.url}\n${error.description}';
+                        });
+                      },
+                    )
+                  : _loadingView(),
+            ),
           ),
+          if (_jsError.isNotEmpty)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: SafeArea(
+                top: false,
+                child: GestureDetector(
+                  onTap: () => setState(() => _jsError = ''),
+                  child: Container(
+                    color: const Color(0xE6B3261E),
+                    padding: const EdgeInsets.all(8),
+                    child: Text(
+                      'JS 错误（点掉）: $_jsError',
+                      style: const TextStyle(color: Colors.white, fontSize: 10),
+                    ),
+                  ),
+                ),
+              ),
+            ),
           if (_barVisible)
             Positioned(
               top: 0,
