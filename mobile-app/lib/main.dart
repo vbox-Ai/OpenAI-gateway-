@@ -78,6 +78,9 @@ class _WebUiPageState extends State<WebUiPage> {
 
   bool _busy = false;
 
+  /// 实际数据目录（解析结果，启动失败时打进报错便于定位）
+  String _dataPath = '';
+
   /// 最近一条 JS 错误（页面脚本抛错时贴在底部，点一下消失）
   String _jsError = '';
 
@@ -170,8 +173,8 @@ class _WebUiPageState extends State<WebUiPage> {
   Future<void> _doExport({required String name, required String data}) async {
     try {
       final bytes = base64Decode(data);
-      final docs = await getApplicationDocumentsDirectory();
-      final exports = Directory('${docs.path}/Exports');
+      final base = await _resolveDataDir();
+      final exports = Directory('${base.path}/Exports');
       await exports.create(recursive: true);
       // 文件名只取末尾一段，防路径注入
       final safe = name.replaceAll('\\', '/').split('/').last;
@@ -180,7 +183,7 @@ class _WebUiPageState extends State<WebUiPage> {
       if (!mounted) return;
       setState(() {
         _jsError = '';
-        _exportNote = '已导出：Exports/$safe（文件 App 可见）';
+        _exportNote = '已导出：${exports.path}/$safe';
       });
     } catch (e) {
       if (!mounted) return;
@@ -212,7 +215,8 @@ class _WebUiPageState extends State<WebUiPage> {
         _detail = '';
       });
 
-      final docs = await getApplicationDocumentsDirectory();
+      final docs = await _resolveDataDir();
+      _dataPath = docs.path;
       final uiPath = '${docs.path}/ui';
 
       // 解压判据用 index.html 而不是目录是否存在：上一次解压中途被杀会留下
@@ -257,7 +261,7 @@ class _WebUiPageState extends State<WebUiPage> {
         _failed = true;
         _barVisible = true;
         _stage = '启动失败';
-        _detail = '${e.toString()}\nping=${_safePing()}';
+        _detail = '${e.toString()}\n数据目录=$_dataPath\nping=${_safePing()}';
       });
     } finally {
       _busy = false;
@@ -271,6 +275,34 @@ class _WebUiPageState extends State<WebUiPage> {
     } catch (e) {
       return 'symbol-missing';
     }
+  }
+
+  /// 解析一个「确实可写」的数据目录。
+  ///
+  /// TrollStore（no-container）环境下，`getApplicationDocumentsDirectory` 的
+  /// NSDocumentDirectory 解析可能落到 `/`（根目录）或不可写路径，直接创建会
+  /// EPERM。这里按「Application Support → Documents → Library」依次尝试，
+  /// 逐个验证「非空、非根、能真正 mkdir」，全部失败才退回系统临时目录。
+  Future<Directory> _resolveDataDir() async {
+    final candidates = <Future<Directory> Function()>[
+      getApplicationSupportDirectory,
+      getApplicationDocumentsDirectory,
+      getLibraryDirectory,
+    ];
+    for (final getter in candidates) {
+      try {
+        final dir = await getter();
+        final path = dir.path;
+        if (path.isEmpty || path == '/' || path == '//') continue;
+        await Directory(path).create(recursive: true);
+        return Directory(path);
+      } catch (_) {
+        // 这个候选不可用，试下一个
+      }
+    }
+    final tmp = Directory.systemTemp;
+    await tmp.create(recursive: true);
+    return tmp;
   }
 
   /// 轮询 /health：`server::start` 只保证 bind，监听任务异步起来。
