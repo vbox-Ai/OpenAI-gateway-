@@ -142,7 +142,7 @@ jobs:
               t.build_configurations.each do |c|
                 base = c.build_settings['OTHER_LDFLAGS']
                 base = '\$(inherited)' if base.nil? || base.empty?
-                c.build_settings['OTHER_LDFLAGS'] = base + ' -force_load ' + rust_lib
+                c.build_settings['OTHER_LDFLAGS'] = base + ' -Wl,-force_load,' + rust_lib
               end
             end
             project.save
@@ -162,10 +162,10 @@ jobs:
           echo "=== .a 大小 ==="
           ls -lh mobile-app/rust/libagent2api_server.a
           echo "=== .a 符号检查 ==="
-          nm mobile-app/rust/libagent2api_server.a 2>/dev/null | grep -c "agent2api_server" || echo "NO_SYMBOL_IN_A"
+          if nm mobile-app/rust/libagent2api_server.a 2>/dev/null | grep -q "agent2api_server_ping"; then echo "A_HAS_SYMBOL"; else echo "A_NO_SYMBOL"; fi
           APP=mobile-app/build/Build/Products/Release-iphoneos/Runner.app
           echo "=== 二进制符号检查 ==="
-          nm "$APP/Runner" 2>/dev/null | grep -c "agent2api_server" || echo "NO_SYMBOL_IN_BINARY"
+          if nm "$APP/Runner" 2>/dev/null | grep -q "agent2api_server_ping"; then echo "BIN_HAS_SYMBOL"; else echo "BIN_NO_SYMBOL"; fi
           du -sh "$APP"
           mkdir -p mobile-app/dist/Payload
           cp -r "$APP" mobile-app/dist/Payload/
