@@ -14,7 +14,7 @@
 //! `server::start` 只同步 bind，监听任务是在后台运行时里起的；立刻让 webview
 //! 去请求会拿到 connection refused，WKWebView 就停在白屏且不再重试。
 
-import 'dart:convert' show base64Decode;
+import 'dart:convert' show base64Decode, jsonDecode, jsonEncode;
 import 'dart:io';
 
 import 'package:archive/archive_io.dart';
@@ -225,6 +225,11 @@ class _WebUiPageState extends State<WebUiPage> {
         }
       }
 
+      // 解包插件（越狱 spawn 路线）：网关 bootstrap 时读 plugins.json 并 spawn
+      // 插件进程（agent2api-providers，21+ 家 provider）。必须在 start 之前落盘。
+      _set(() => _stage = '解包提供商插件…');
+      await _extractPlugins(docs.path);
+
       _set(() {
         _stage = '启动网关服务…';
         _detail = '端口 $kPort　数据目录 ${docs.path}';
@@ -317,6 +322,81 @@ class _WebUiPageState extends State<WebUiPage> {
       await out.parent.create(recursive: true);
       await out.writeAsBytes(content, flush: true);
     }
+  }
+
+  /// 解包插件包到 `{dataDir}/plugins/` 并写注册表 plugins.json。
+  ///
+  /// 插件（agent2api-providers，21+ 家 provider 的单一进程）在越狱 / TrollStore
+  /// 环境下由网关 plugin_host 用 posix_spawn 拉起。目录布局与网关 install 落盘
+  /// 一致（见 plugin_host::install 的模块头）：
+  ///
+  ///   {dataDir}/plugins/
+  ///     plugins.json                             注册表
+  ///     agent2api-providers/{version}/
+  ///       pack.json                              manifest
+  ///       bin/agent2api-providers                iOS 可执行文件
+  ///
+  /// 可执行权限不用这里管 —— 网关 `ensure_entry_executable` 会 chmod +x。
+  Future<void> _extractPlugins(String dataPath) async {
+    const version = '3.3.0-beta.5.1';
+    final pluginsDir = Directory('$dataPath/plugins');
+    final packDir = Directory('$pluginsDir/agent2api-providers/$version');
+    final exe = File('${packDir.path}/bin/agent2api-providers');
+    final registry = File('$pluginsDir/plugins.json');
+
+    // 已装好就跳过（避免每次启动重复解压 / 覆盖）
+    if (registry.existsSync() && exe.existsSync()) return;
+
+    final data = await rootBundle.load('assets/plugins.zip');
+    final archive = ZipDecoder().decodeBytes(data.buffer.asUint8List());
+    final root = Directory('${packDir.path}').absolute;
+    final rootPrefix = '${root.path}${Platform.pathSeparator}';
+    await root.create(recursive: true);
+
+    for (final file in archive) {
+      if (!file.isFile) continue;
+      final content = file.content;
+      if (content is! List<int>) continue;
+      var name = file.name.replaceAll('\\', '/');
+      while (name.startsWith('./')) {
+        name = name.substring(2);
+      }
+      name = name.replaceFirst(RegExp(r'^/+'), '');
+      if (name.isEmpty) continue;
+      final out = File('${root.path}/$name');
+      final normalized = out.absolute.path;
+      if (!normalized.startsWith(rootPrefix)) continue;
+      await out.parent.create(recursive: true);
+      await out.writeAsBytes(content, flush: true);
+    }
+
+    if (!exe.existsSync()) {
+      throw StateError('插件包解压后缺少 bin/agent2api-providers');
+    }
+
+    // 从 pack.json 读 provider 清单，写进注册表的 manifest_providers
+    // （网关 provider_enabled 依赖它，空表会让所有插件家被判为「未启用」）。
+    final manifest = jsonDecode(
+      await File('${root.path}/pack.json').readAsString(),
+    ) as Map<String, dynamic>;
+    final providers = manifest['providers'] as List? ?? const [];
+
+    final installed = {
+      'id': 'agent2api-providers',
+      'version': version,
+      'enabled': true,
+      'providers': <String, bool>{},
+      'entry': 'bin/agent2api-providers',
+      'sha256': '',
+      'signed': false,
+      'installed_at': DateTime.now().millisecondsSinceEpoch,
+      'manifest_providers': providers,
+    };
+    await registry.parent.create(recursive: true);
+    await registry.writeAsString(
+      jsonEncode({'packs': [installed]}),
+      flush: true,
+    );
   }
 
   @override

@@ -117,6 +117,37 @@ jobs:
           print('ATS + file-sharing injected')
           PYEOF
 
+      - name: 编译插件可执行文件（越狱 spawn）+ 打 iOS 插件 zip
+        run: |
+          # 插件（agent2api-providers，21+ 家 provider 的单一进程）编译成 iOS arm64
+          # 可执行文件，随 ipa 分发。越狱 / TrollStore（iOS 17.0 黄金版本）下，
+          # platformized 的 App 能 posix_spawn 这个 exe —— 网关 plugin_host 原样拉起。
+          mkdir -p "$RUNNER_TEMP/providers"
+          git clone --depth 1 --branch v3.3.0-beta.5.1 \
+            https://github.com/vbox-Ai/OpenAI-.git "$RUNNER_TEMP/providers" 2>/dev/null \
+            || git clone --depth 1 https://github.com/vbox-Ai/OpenAI-.git "$RUNNER_TEMP/providers"
+          cd "$RUNNER_TEMP/providers"
+          git checkout v3.3.0-beta.5.1 2>/dev/null || true
+          cargo build --release --target aarch64-apple-ios --bin agent2api-providers
+          ls -lh target/aarch64-apple-ios/release/agent2api-providers
+          # 打 iOS 插件 zip：pack.json（补 aarch64-apple-ios entry）+ bin/agent2api-providers。
+          # 首版不打包插件 UI 资源（icons/ui），聚焦 provider 转发跑通；签到中心
+          # 的插件页面后续补。
+          python3 - <<'PYEOF'
+          import json, zipfile, os
+          with open('pack.json', encoding='utf-8') as f:
+              m = json.load(f)
+          m['entry']['aarch64-apple-ios'] = 'bin/agent2api-providers'
+          keep = {k: m.get(k) for k in ('id', 'name', 'version', 'protocol', 'providers', 'entry')}
+          out = os.path.join(os.environ['GITHUB_WORKSPACE'], 'mobile-app', 'assets')
+          os.makedirs(out, exist_ok=True)
+          with zipfile.ZipFile(os.path.join(out, 'plugins.zip'), 'w', zipfile.ZIP_DEFLATED) as z:
+              z.writestr('pack.json', json.dumps(keep, ensure_ascii=False, indent=2))
+              z.write('target/aarch64-apple-ios/release/agent2api-providers', 'bin/agent2api-providers')
+          print('plugins.zip done')
+          PYEOF
+          ls -lh "$GITHUB_WORKSPACE/mobile-app/assets/plugins.zip"
+
       - name: 注入 Rust 符号引用（防 dead-strip）
         run: |
           cat > mobile-app/ios/Runner/AppDelegate.swift <<'SWIFTEOF'
