@@ -7,6 +7,7 @@ import 'package:ffi/ffi.dart';
 ///
 /// 符号：
 ///   agent2api_server_start(const char* data_dir, uint16_t port) -> int32
+///   agent2api_server_stop() -> int32
 ///   agent2api_server_ping() -> int32
 class Agent2ApiServer {
   Agent2ApiServer._();
@@ -14,11 +15,9 @@ class Agent2ApiServer {
   static final DynamicLibrary _lib = _load();
 
   static DynamicLibrary _load() {
-    if (Platform.isIOS) {
-      // iOS：静态库已链接进主二进制，符号直接可解析
-      return DynamicLibrary.process();
-    }
-    if (Platform.isMacOS) {
+    // iOS / macOS：静态库已链接进主二进制，符号直接可解析。
+    // （链接期靠 -Wl,-force_load + -Wl,-u,_agent2api_server_start 保证不被剥掉）
+    if (Platform.isIOS || Platform.isMacOS) {
       return DynamicLibrary.process();
     }
     throw UnsupportedError('当前平台不支持：${Platform.operatingSystem}');
@@ -27,6 +26,10 @@ class Agent2ApiServer {
   static final int Function(Pointer<Utf8>, int) _start = _lib
       .lookup<NativeFunction<Int32 Function(Pointer<Utf8>, Uint16)>>(
           'agent2api_server_start')
+      .asFunction();
+
+  static final int Function() _stop = _lib
+      .lookup<NativeFunction<Int32 Function()>>('agent2api_server_stop')
       .asFunction();
 
   static final int Function() _ping = _lib
@@ -46,4 +49,7 @@ class Agent2ApiServer {
       malloc.free(ptr);
     }
   }
+
+  /// 请求停机（幂等），返回 0 = 已发出停机信号
+  static int stop() => _stop();
 }

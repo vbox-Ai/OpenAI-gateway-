@@ -30,9 +30,15 @@ pub mod server;
 pub mod web_shim;
 
 use std::future::Future;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use tokio::runtime::{Handle, Runtime};
+
+/// 服务器停机句柄：`server::start` 返回的 oneshot Sender **一旦被 drop 就等于
+/// 发出停机信号**（见 `server::start` 里的 `shutdown_rx.await`）。嵌入形态下
+/// 必须把它存进静态槽位，否则 `run_headless` 一返回，局部变量出作用域，
+/// 服务器刚起来就停 —— 表现就是 App 显示「服务已启动」但 webview 白屏。
+static SHUTDOWN: Mutex<Option<tokio::sync::oneshot::Sender<()>>> = Mutex::new(None);
 
 /// 惰性全局运行时：只承接「在非 Tokio 上下文里发起的后台任务」，
 /// 正常路径（handler / 既有任务体内）不会碰到它。
@@ -93,8 +99,33 @@ pub fn run_headless(data_dir: &str, port: u16) -> Result<(), String> {
     server::access::load_access_tokens();
     server::access::sync_env_admin_to_store();
 
-    let _shutdown = server::start(&state).map_err(|conflict| conflict.message)?;
+    let shutdown = server::start(&state).map_err(|conflict| conflict.message)?;
+
+    // 句柄必须长期持有：drop 即停机（见 SHUTDOWN 的注释）。
+    // 重复调用 start 时先放掉旧句柄，避免泄漏的同时让新实例接管。
+    match SHUTDOWN.lock() {
+        Ok(mut slot) => *slot = Some(shutdown),
+        Err(_) => {
+            std::mem::forget(shutdown);
+            return Err("停机句柄槽位已中毒".to_string());
+        }
+    }
     Ok(())
+}
+
+/// FFI 包装：请求停机（幂等）。返回 0 表示已发出停机信号。
+#[no_mangle]
+pub extern "C" fn agent2api_server_stop() -> i32 {
+    match SHUTDOWN.lock() {
+        Ok(mut slot) => match slot.take() {
+            Some(tx) => {
+                let _ = tx.send(());
+                0
+            }
+            None => 1,
+        },
+        Err(_) => 2,
+    }
 }
 
 /// FFI 包装：从 Flutter 调用，返回 0 表示启动成功，非 0 表示失败。
