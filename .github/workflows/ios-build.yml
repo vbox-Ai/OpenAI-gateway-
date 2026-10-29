@@ -149,23 +149,25 @@ jobs:
             puts 'force_load injected into Runner OTHER_LDFLAGS'
           "
 
-      - name: 构建 iOS App（无签名）
+      - name: 构建 iOS App（xcodebuild 直连，避开 flutter build 的 pod 重装）
         run: |
-          cd mobile-app
-          flutter build ios --no-codesign --release
+          cd mobile-app/ios
+          xcodebuild -workspace Runner.xcworkspace -scheme Runner \
+            -configuration Release -sdk iphoneos \
+            -derivedDataPath ../build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
 
       - name: 打包 IPA
         run: |
-          cd mobile-app/build/ios/iphoneos
-          du -sh Runner.app
-          mkdir -p Payload
-          cp -r Runner.app Payload/
-          zip -qry agent2api-mobile.ipa Payload
-          ls -lh agent2api-mobile.ipa
+          APP=mobile-app/build/Build/Products/Release-iphoneos/Runner.app
+          du -sh "$APP"
+          mkdir -p mobile-app/dist/Payload
+          cp -r "$APP" mobile-app/dist/Payload/
+          ( cd mobile-app/dist && zip -qry agent2api-mobile.ipa Payload && ls -lh agent2api-mobile.ipa )
 
       - name: 上传 IPA 产物
         uses: actions/upload-artifact@v4
         with:
           name: agent2api-mobile-ios
-          path: mobile-app/build/ios/iphoneos/agent2api-mobile.ipa
+          path: mobile-app/dist/agent2api-mobile.ipa
           if-no-files-found: error
