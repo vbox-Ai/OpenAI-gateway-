@@ -372,9 +372,12 @@ class _WebUiPageState extends State<WebUiPage> {
   Future<void> _extractPlugins(String dataPath) async {
     const version = '3.3.0-beta.5.1';
     final pluginsDir = Directory('$dataPath/plugins');
-    final packDir = Directory('$pluginsDir/agent2api-providers/$version');
+    // 注意：不能写 `'$pluginsDir/…'` —— Directory 对象插值会变成
+    // `Directory: '/path'` 这种带前缀的字符串，拼出非法路径
+    // （cwd 是 /，最后得到 `/Directory: …`）。必须显式取 `.path`。
+    final packDir = Directory('${pluginsDir.path}/agent2api-providers/$version');
     final exe = File('${packDir.path}/bin/agent2api-providers');
-    final registry = File('$pluginsDir/plugins.json');
+    final registry = File('${pluginsDir.path}/plugins.json');
 
     // 已装好就跳过（避免每次启动重复解压 / 覆盖）
     if (registry.existsSync() && exe.existsSync()) return;
