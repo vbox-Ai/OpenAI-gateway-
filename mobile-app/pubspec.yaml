@@ -13,6 +13,10 @@ dependencies:
   ffi: ^2.1.0
   # 复用网关 Web UI：webview 加载本地 headless server（127.0.0.1:3065）
   flutter_inappwebview: ^6.0.0
+  # 取沙盒 Documents 目录
+  path_provider: ^2.1.3
+  # 解压打包的 Web UI zip
+  archive: ^3.6.1
 
 dev_dependencies:
   flutter_test:
@@ -21,3 +25,5 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/ui.zip

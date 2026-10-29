@@ -93,6 +93,26 @@ jobs:
           end
           RUBYEOF
 
+      - name: 打包 Web UI + 注入 ATS 放行本地回环
+        run: |
+          # 打包网关 Web UI（静态文件）为单个 zip 资产，运行时解压到 {Documents}/ui/
+          mkdir -p mobile-app/assets
+          ( cd desktop-tauri/ui && zip -qry ../../mobile-app/assets/ui.zip . )
+          ls -lh mobile-app/assets/ui.zip
+          # ATS：放行本地回环 HTTP（webview 加载 http://127.0.0.1:3065 会被默认拦截）
+          python3 - <<'PYEOF'
+          import plistlib
+          p = 'mobile-app/ios/Runner/Info.plist'
+          with open(p, 'rb') as f:
+              data = plistlib.load(f)
+          ats = data.setdefault('NSAppTransportSecurity', {})
+          ats['NSAllowsLocalNetworking'] = True
+          ats['NSAllowsArbitraryLoads'] = True
+          with open(p, 'wb') as f:
+              plistlib.dump(data, f)
+          print('ATS injected')
+          PYEOF
+
       - name: 注入 Rust 符号引用（防 dead-strip）
         run: |
           cat > mobile-app/ios/Runner/AppDelegate.swift <<'SWIFTEOF'
