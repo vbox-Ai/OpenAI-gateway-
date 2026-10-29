@@ -14,6 +14,7 @@
 //! `server::start` 只同步 bind，监听任务是在后台运行时里起的；立刻让 webview
 //! 去请求会拿到 connection refused，WKWebView 就停在白屏且不再重试。
 
+import 'dart:convert' show base64Decode;
 import 'dart:io';
 
 import 'package:archive/archive_io.dart';
@@ -79,6 +80,9 @@ class _WebUiPageState extends State<WebUiPage> {
 
   /// 最近一条 JS 错误（页面脚本抛错时贴在底部，点一下消失）
   String _jsError = '';
+
+  /// 导出完成提示（文件已写进 App 文档目录，文件 App 可见）
+  String _exportNote = '';
 
   /// webview 句柄（弹窗兜底导航用）
   InAppWebViewController? _web;
@@ -157,6 +161,30 @@ class _WebUiPageState extends State<WebUiPage> {
     } catch (_) {
       // 退路：实在开不了就在当前 webview 里导航（会丢 SPA 状态，但能看见页面）
       await _web?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
+    }
+  }
+
+  /// 把导出的文件写进 App 文档目录 Exports/ 下。
+  /// Info.plist 已开 UIFileSharingEnabled + LSSupportsOpeningDocumentsInPlace，
+  /// 用户在系统「文件」App → 我的 iPhone → Agent2API 里即可看到并拷出。
+  Future<void> _doExport({required String name, required String data}) async {
+    try {
+      final bytes = base64Decode(data);
+      final docs = await getApplicationDocumentsDirectory();
+      final exports = Directory('${docs.path}/Exports');
+      await exports.create(recursive: true);
+      // 文件名只取末尾一段，防路径注入
+      final safe = name.replaceAll('\\', '/').split('/').last;
+      final file = File('${exports.path}/$safe');
+      await file.writeAsBytes(bytes, flush: true);
+      if (!mounted) return;
+      setState(() {
+        _jsError = '';
+        _exportNote = '已导出：Exports/$safe（文件 App 可见）';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _exportNote = '导出失败：$e');
     }
   }
 
@@ -339,6 +367,21 @@ class _WebUiPageState extends State<WebUiPage> {
                             return null;
                           },
                         );
+                        // 导出桥：web_shim 在 iOS 下把导出内容转 base64 传过来，
+                        // 原生侧写进 App 文档目录（文件 App 可见）。
+                        controller.addJavaScriptHandler(
+                          handlerName: 'a2aExport',
+                          callback: (args) {
+                            if (args.isEmpty) return null;
+                            final map = args.first;
+                            if (map is! Map) return null;
+                            _doExport(
+                              name: (map['name'] ?? 'export.bin').toString(),
+                              data: (map['data'] ?? '').toString(),
+                            );
+                            return null;
+                          },
+                        );
                         controller.addUserScript(
                           userScript: UserScript(
                             source: _popupBridgeJs,
@@ -391,6 +434,30 @@ class _WebUiPageState extends State<WebUiPage> {
                     child: Text(
                       'JS 错误（点掉）: $_jsError',
                       style: const TextStyle(color: Colors.white, fontSize: 10),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          if (_exportNote.isNotEmpty)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: SafeArea(
+                top: false,
+                child: GestureDetector(
+                  onTap: () => setState(() => _exportNote = ''),
+                  child: Container(
+                    color: const Color(0xE61F7A3D),
+                    padding: const EdgeInsets.all(10),
+                    child: Text(
+                      _exportNote,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                   ),
                 ),

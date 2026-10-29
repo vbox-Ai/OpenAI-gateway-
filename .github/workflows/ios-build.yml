@@ -108,9 +108,13 @@ jobs:
           ats = data.setdefault('NSAppTransportSecurity', {})
           ats['NSAllowsLocalNetworking'] = True
           ats['NSAllowsArbitraryLoads'] = True
+          # 文件共享：导出（系统事件 / 账号 / 日志）写到 Documents/Exports 后，
+          # 用户在系统「文件」App → 我的 iPhone → 本 App 里能直接看到并拷出
+          data['UIFileSharingEnabled'] = True
+          data['LSSupportsOpeningDocumentsInPlace'] = True
           with open(p, 'wb') as f:
               plistlib.dump(data, f)
-          print('ATS injected')
+          print('ATS + file-sharing injected')
           PYEOF
 
       - name: 注入 Rust 符号引用（防 dead-strip）

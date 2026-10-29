@@ -542,6 +542,31 @@ pub fn shim_js() -> &'static str {
     },
   };
 
+  /** iOS（WKWebView）里不落盘：<a download> 不触发保存，改走原生导出桥 */
+  function isIosWebview() {
+    return /iPhone|iPad|iPod/i.test(navigator.userAgent)
+      && typeof window.flutter_inappwebview !== 'undefined'
+      && typeof window.flutter_inappwebview.callHandler === 'function';
+  }
+
+  /** Blob → base64（去 data: 前缀），交给原生侧落盘 */
+  function blobToBase64(blob) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onloadend = function () {
+        var result = reader.result;
+        if (typeof result === 'string') {
+          var comma = result.indexOf(',');
+          resolve(comma >= 0 ? result.substring(comma + 1) : result);
+        } else {
+          reject(new Error('读取文件内容失败'));
+        }
+      };
+      reader.onerror = function () { reject(reader.error); };
+      reader.readAsDataURL(blob);
+    });
+  }
+
   /** 网页端的「文件对话框」：拉成 Blob 触发浏览器下载 */
   async function downloadFile(method, path, filename) {
     var headers = { 'Accept': '*/*' };
@@ -569,6 +594,20 @@ pub fn shim_js() -> &'static str {
         blob = new Blob([JSON.stringify(body.data, null, 2)], { type: 'application/json' });
       }
     } catch (e) { /* 非 JSON 响应（日志下载）按原文保存 */ }
+    // iOS：WKWebView 没有 HTML5 download 能力（点 <a download> 无反应），
+    // 把内容转 base64 交给原生侧写进 App 文档目录（Info.plist 已开文件共享，
+    // 用户在系统「文件」App 里就能取到）。桌面 / 普通浏览器照旧走下载。
+    if (isIosWebview()) {
+      var b64 = await blobToBase64(blob);
+      window.flutter_inappwebview.callHandler('a2aExport', {
+        name: filename,
+        mime: blob.type || 'application/octet-stream',
+        data: b64,
+      });
+      summary.saved = true;
+      summary.iosExport = true;
+      return summary;
+    }
     var url = URL.createObjectURL(blob);
     var link = document.createElement('a');
     link.href = url;
