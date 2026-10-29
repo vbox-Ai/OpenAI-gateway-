@@ -1,18 +1,19 @@
-name: iOS IPA 构建
+name: iOS 构建与发布
 
-# 从网关静态库到可安装 .ipa 的完整流水线（跑在 macOS runner 上）。
+# 单一工作流：cargo 构建网关 .a → flutter 平台壳 → 链接 .a（force_load + -u 防
+# dead-strip）→ xcodebuild 出 Runner.app → 打包裸 .ipa → 上传 Releases。
 #
-# 链路：cargo build .a → flutter create 平台壳 → 链接 .a（Ruby 直改
-#       Runner.xcodeproj 的 OTHER_LDFLAGS + force_load）→ flutter build ios
-#       --no-codesign → 打包 Payload → .ipa
+# 触发：手动（workflow_dispatch）。产物：
+#   - Releases 里的裸 agent2api-mobile.ipa（可直接 ldid 签名安装）
+#   - Actions Artifacts 里的备份（zip）
 #
-# 关键：dart:ffi 运行时才解析 Rust 符号，链接期没有代码引用，链接器会 dead-strip
-#       整个 .a，必须 -force_load 强制完整链入。
-#
-# 签名：默认不签名（--no-codesign）。越狱机用 ldid -S 假签名即可安装。
+# 签名：默认不签名。越狱机用 ldid -S 假签名即可装，不上架、不需要 Apple 证书。
 
 on:
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build-ipa:
@@ -47,9 +48,7 @@ jobs:
           mkdir -p mobile-app/rust
           cp target/aarch64-apple-ios/release/libagent2api_server.a mobile-app/rust/
           cat > mobile-app/ios/Podfile <<'RUBYEOF'
-          # 注意：不能用过低的 platform —— 当前 Flutter 3.47 的 Flutter pod
-          # 要求更高的最低部署目标，13.0 会触发 "required a higher minimum
-          # deployment target" 错误。
+          # Flutter 3.47 的 Flutter pod 要求更高的最低部署目标，13.0 会报错
           platform :ios, '15.0'
 
           ENV['COCOAPODS_DISABLE_STATS'] = 'true'
@@ -96,13 +95,10 @@ jobs:
 
       - name: 注入 Rust 符号引用（防 dead-strip）
         run: |
-          # 用 Swift @_silgen_name 引用 Rust 符号，在链接期产生 undefined reference，
-          # 强制链接器把 .a 里的对象文件（含级联的整个 server）拉进来。
           cat > mobile-app/ios/Runner/AppDelegate.swift <<'SWIFTEOF'
           import Flutter
           import UIKit
 
-          // 引用 Rust 静态库符号（dart:ffi 运行时才 lookup，链接期必须显式引用）
           @_silgen_name("agent2api_server_ping")
           func agent2api_server_ping() -> Int32
 
@@ -115,7 +111,6 @@ jobs:
               _ application: UIApplication,
               didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
             ) -> Bool {
-              // 调用一次，确保链接器解析 Rust 符号（返回 42，无副作用）
               _ = agent2api_server_ping()
               GeneratedPluginRegistrant.register(with: self)
               return super.application(application, didFinishLaunchingWithOptions: launchOptions)
@@ -142,17 +137,16 @@ jobs:
               t.build_configurations.each do |c|
                 base = c.build_settings['OTHER_LDFLAGS']
                 base = '\$(inherited)' if base.nil? || base.empty?
-                # 关键：dead_strip 是 section 级死代码消除。force_load 只保证整个 .a
-                # 进入链接，但 run_headless/server 的 section 没人引用仍会被裁掉。
-                # -u 把符号标记为「未解析引用」，强制保留该符号及其级联依赖。
+                # dead_strip 是 section 级消除，force_load 只保证 .a 进入链接，
+                # 必须 -u 把符号标记为未解析引用，强制保留 start 及其级联依赖
                 c.build_settings['OTHER_LDFLAGS'] = base + ' -Wl,-force_load,' + rust_lib + ' -Wl,-u,_agent2api_server_start -Wl,-u,_agent2api_server_ping'
               end
             end
             project.save
-            puts 'force_load + -u injected into Runner OTHER_LDFLAGS'
+            puts 'force_load + -u injected'
           "
 
-      - name: 构建 iOS App（xcodebuild 直连，避开 flutter build 的 pod 重装）
+      - name: 构建 iOS App（xcodebuild 直连，避开 pod 重装重置 OTHER_LDFLAGS）
         run: |
           cd mobile-app/ios
           xcodebuild -workspace Runner.xcworkspace -scheme Runner \
@@ -160,23 +154,28 @@ jobs:
             -derivedDataPath ../build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
 
-      - name: 打包 IPA
+      - name: 打包裸 IPA
         run: |
-          echo "=== .a 大小 ==="
-          ls -lh mobile-app/rust/libagent2api_server.a
-          echo "=== .a 符号检查 ==="
-          if nm mobile-app/rust/libagent2api_server.a 2>/dev/null | grep -q "agent2api_server_ping"; then echo "A_HAS_SYMBOL"; else echo "A_NO_SYMBOL"; fi
           APP=mobile-app/build/Build/Products/Release-iphoneos/Runner.app
-          echo "=== 二进制符号检查 ==="
-          if nm "$APP/Runner" 2>/dev/null | grep -q "agent2api_server_ping"; then echo "BIN_HAS_SYMBOL"; else echo "BIN_NO_SYMBOL"; fi
           du -sh "$APP"
           mkdir -p mobile-app/dist/Payload
           cp -r "$APP" mobile-app/dist/Payload/
           ( cd mobile-app/dist && zip -qry agent2api-mobile.ipa Payload && ls -lh agent2api-mobile.ipa )
 
-      - name: 上传 IPA 产物
+      - name: 上传 ipa 备份到 Actions Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: agent2api-mobile-ios
           path: mobile-app/dist/agent2api-mobile.ipa
           if-no-files-found: error
+
+      - name: 发布裸 ipa 到 Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete mobile --yes 2>/dev/null || true
+          gh api -X DELETE repos/${{ github.repository }}/git/refs/tags/mobile 2>/dev/null || true
+          gh release create mobile mobile-app/dist/agent2api-mobile.ipa \
+            --title "Agent2API iOS" \
+            --notes "iOS 构建产物：含 Rust 网关整机（18 家 provider + 完整 API + FFI 入口）+ Flutter 壳 + webview。越狱机安装：ldid -S agent2api-mobile.ipa" \
+            --latest
