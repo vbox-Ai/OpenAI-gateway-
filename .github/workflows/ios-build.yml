@@ -142,11 +142,14 @@ jobs:
               t.build_configurations.each do |c|
                 base = c.build_settings['OTHER_LDFLAGS']
                 base = '\$(inherited)' if base.nil? || base.empty?
-                c.build_settings['OTHER_LDFLAGS'] = base + ' -Wl,-force_load,' + rust_lib
+                # 关键：dead_strip 是 section 级死代码消除。force_load 只保证整个 .a
+                # 进入链接，但 run_headless/server 的 section 没人引用仍会被裁掉。
+                # -u 把符号标记为「未解析引用」，强制保留该符号及其级联依赖。
+                c.build_settings['OTHER_LDFLAGS'] = base + ' -Wl,-force_load,' + rust_lib + ' -Wl,-u,_agent2api_server_start -Wl,-u,_agent2api_server_ping'
               end
             end
             project.save
-            puts 'force_load injected into Runner OTHER_LDFLAGS'
+            puts 'force_load + -u injected into Runner OTHER_LDFLAGS'
           "
 
       - name: 构建 iOS App（xcodebuild 直连，避开 flutter build 的 pod 重装）
