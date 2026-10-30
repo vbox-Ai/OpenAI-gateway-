@@ -341,7 +341,7 @@ fn ios_spawn_diagnostics(exe: &std::path::Path) -> String {
         Err(error) => hints.push(format!("入口文件不存在：{error}")),
     }
     if hints.is_empty() {
-        "诊断：入口存在、可执行、带代码签名 —— EPERM 来自系统 AMFI 层，需要安装带最新插件签名修复的 ipa（旧包里的 exe 缺 entitlements，无法直接修复）".to_string()
+        "诊断：入口存在、可执行、带代码签名 —— EPERM 来自系统 AMFI 层。这个二进制是 ldid ad-hoc 签名、没有 TrollStore 的 CoreTrust 证书链，spawn 必然被拒；需装 bundle 分发的 ipa（插件 exe 随 Runner.app 打包，由 TrollStore 安装时重签）".to_string()
     } else {
         format!("诊断：{}", hints.join("；"))
     }

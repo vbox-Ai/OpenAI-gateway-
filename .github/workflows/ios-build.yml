@@ -117,29 +117,15 @@ jobs:
           print('ATS + file-sharing injected')
           PYEOF
 
-      - name: 编译插件可执行文件（越狱 spawn）+ 打 iOS 插件 zip
+      - name: 编译插件可执行文件（providers + 网页提供商）+ 打 iOS 插件 zip
         run: |
-          # 插件（agent2api-providers，21+ 家 provider 的单一进程）编译成 iOS arm64
-          # 可执行文件，随 ipa 分发。越狱 / TrollStore（iOS 17.0 黄金版本）下，
-          # platformized 的 App 能 posix_spawn 这个 exe —— 网关 plugin_host 原样拉起。
-          mkdir -p "$RUNNER_TEMP/providers"
-          git clone --depth 1 --branch v3.3.0-beta.5.1 \
-            https://github.com/vbox-Ai/OpenAI-.git "$RUNNER_TEMP/providers" 2>/dev/null \
-            || git clone --depth 1 https://github.com/vbox-Ai/OpenAI-.git "$RUNNER_TEMP/providers"
-          cd "$RUNNER_TEMP/providers"
-          git checkout v3.3.0-beta.5.1 2>/dev/null || true
-          cargo build --release --target aarch64-apple-ios --bin agent2api-providers
-          ls -lh target/aarch64-apple-ios/release/agent2api-providers
-          # 给插件 exe 打 ad-hoc 签名：iOS 的 AMFI 要求被 posix_spawn 的二进制
-          # 有有效代码签名，否则即使父 App 已 platformize 也会 EPERM。TrollStore
-          # 只重签 bundle 内 Mach-O，运行时解压到 Documents 的裸二进制不受它管，
-          # 必须在打包前自己签好（ad-hoc 签名嵌入 Mach-O，解压/拷贝不破坏）。
+          # 两个插件 exe 都编译成 iOS arm64，随 ipa 分发。越狱 / TrollStore
+          # （iOS 17.0 黄金版本）下，platformized 的 App 能 posix_spawn 这些 exe
+          # —— 但**前提是它们随 App bundle 分发**：TrollStore 安装时会用自己的
+          # CoreTrust 证书重签 bundle 内每一个 Mach-O（见下方「注入插件 exe 到
+          # bundle」步骤），运行时解压到数据目录的裸二进制只带 ldid ad-hoc 签名、
+          # 没有 TrollStore 证书链，spawn 必然 EPERM（build 24-26 实测）。
           brew install ldid 2>/dev/null || true
-          # 裸 `ldid -S`（纯 ad-hoc、无 entitlements）在 iOS 真机上仍会被 AMFI
-          # 拒绝 spawn（EPERM）—— build 24 实测：exe 有 LC_CODE_SIGNATURE 却照样
-          # Operation not permitted。TrollStore 社区 spawn helper 的标准配方是
-          # ad-hoc 签名 + entitlements（platform-application / no-container 等），
-          # 子进程的 entitlements 与 platformized 父进程不匹配时 AMFI 直接杀。
           cat > helper.entitlements <<'PLEOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -152,23 +138,53 @@ jobs:
           </dict>
           </plist>
           PLEOF
+
+          # ── 1) agent2api-providers（21+ 家 provider 的单一进程）────────
+          mkdir -p "$RUNNER_TEMP/providers"
+          git clone --depth 1 --branch v3.3.0-beta.5.1 \
+            https://github.com/vbox-Ai/OpenAI-.git "$RUNNER_TEMP/providers" 2>/dev/null \
+            || git clone --depth 1 https://github.com/vbox-Ai/OpenAI-.git "$RUNNER_TEMP/providers"
+          cd "$RUNNER_TEMP/providers"
+          git checkout v3.3.0-beta.5.1 2>/dev/null || true
+          cargo build --release --target aarch64-apple-ios --bin agent2api-providers
           ldid -Shelper.entitlements "target/aarch64-apple-ios/release/agent2api-providers"
-          echo "signed agent2api-providers (ad-hoc + entitlements)"
-          # 打 iOS 插件 zip：pack.json（补 aarch64-apple-ios entry）+ bin/agent2api-providers。
-          # 首版不打包插件 UI 资源（icons/ui），聚焦 provider 转发跑通；签到中心
-          # 的插件页面后续补。
+          echo "signed agent2api-providers"
+
+          # ── 2) agent2api-web-providers（网页提供商）────────────────────
+          mkdir -p "$RUNNER_TEMP/web"
+          git clone --depth 1 https://github.com/vbox-Ai/OpenAI-web-.git "$RUNNER_TEMP/web"
+          cd "$RUNNER_TEMP/web"
+          cargo build --release --target aarch64-apple-ios --bin agent2api-web-providers
+          ldid -Shelper.entitlements "target/aarch64-apple-ios/release/agent2api-web-providers"
+          echo "signed agent2api-web-providers"
+
+          # ── 3) 打组合 plugins.zip：两个包各自 pack.json + bin/ ──────
           python3 - <<'PYEOF'
           import json, zipfile, os
-          with open('pack.json', encoding='utf-8') as f:
-              m = json.load(f)
-          m['entry']['aarch64-apple-ios'] = 'bin/agent2api-providers'
-          keep = {k: m.get(k) for k in ('id', 'name', 'version', 'protocol', 'providers', 'entry')}
           out = os.path.join(os.environ['GITHUB_WORKSPACE'], 'mobile-app', 'assets')
           os.makedirs(out, exist_ok=True)
           with zipfile.ZipFile(os.path.join(out, 'plugins.zip'), 'w', zipfile.ZIP_DEFLATED) as z:
-              z.writestr('pack.json', json.dumps(keep, ensure_ascii=False, indent=2))
-              z.write('target/aarch64-apple-ios/release/agent2api-providers', 'bin/agent2api-providers')
-          print('plugins.zip done')
+              # 插件 A：providers
+              with open(os.path.join(os.environ['RUNNER_TEMP'], 'providers', 'pack.json'), encoding='utf-8') as f:
+                  ma = json.load(f)
+              ma['entry']['aarch64-apple-ios'] = 'bin/agent2api-providers'
+              ka = {k: ma.get(k) for k in ('id', 'name', 'version', 'protocol', 'providers', 'entry')}
+              z.writestr('agent2api-providers/%s/pack.json' % ma['version'],
+                         json.dumps(ka, ensure_ascii=False, indent=2))
+              z.write(os.path.join(os.environ['RUNNER_TEMP'], 'providers',
+                                   'target/aarch64-apple-ios/release/agent2api-providers'),
+                      'agent2api-providers/%s/bin/agent2api-providers' % ma['version'])
+              # 插件 B：网页提供商
+              with open(os.path.join(os.environ['RUNNER_TEMP'], 'web', 'pack.json'), encoding='utf-8') as f:
+                  mb = json.load(f)
+              mb['entry']['aarch64-apple-ios'] = 'bin/agent2api-web-providers'
+              kb = {k: mb.get(k) for k in ('id', 'name', 'version', 'protocol', 'providers', 'entry')}
+              z.writestr('agent2api-web-providers/%s/pack.json' % mb['version'],
+                         json.dumps(kb, ensure_ascii=False, indent=2))
+              z.write(os.path.join(os.environ['RUNNER_TEMP'], 'web',
+                                   'target/aarch64-apple-ios/release/agent2api-web-providers'),
+                      'agent2api-web-providers/%s/bin/agent2api-web-providers' % mb['version'])
+          print('plugins.zip done (providers + web-providers)')
           PYEOF
           ls -lh "$GITHUB_WORKSPACE/mobile-app/assets/plugins.zip"
 
@@ -233,6 +249,21 @@ jobs:
             -derivedDataPath ../build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
 
+      - name: 注入插件 exe 到 bundle（供 TrollStore 安装时重签）
+        run: |
+          # 核心修复：把两个插件 exe 放进 Runner.app/plugins/，让 TrollStore 在
+          # 安装 App 时用它的 CoreTrust 证书重签它们。只有带这套证书链的二进制
+          # 被 posix_spawn 拉起时 AMFI 才放行；数据目录里的 ldid ad-hoc 副本
+          # 没有证书，spawn 必 EPERM（build 24-26 实测，见 gateway plugin_host）。
+          APP=mobile-app/build/Build/Products/Release-iphoneos/Runner.app
+          mkdir -p "$APP/plugins"
+          cp "$RUNNER_TEMP/providers/target/aarch64-apple-ios/release/agent2api-providers" \
+             "$APP/plugins/agent2api-providers"
+          cp "$RUNNER_TEMP/web/target/aarch64-apple-ios/release/agent2api-web-providers" \
+             "$APP/plugins/agent2api-web-providers"
+          chmod +x "$APP/plugins/agent2api-providers" "$APP/plugins/agent2api-web-providers"
+          ls -lh "$APP/plugins/"
+
       - name: 校验产物（符号已链接 + Web UI 已打进 bundle）
         run: |
           APP=mobile-app/build/Build/Products/Release-iphoneos/Runner.app
@@ -266,6 +297,18 @@ jobs:
             echo "::error::plugins.zip 里没有 bin/agent2api-providers"
             exit 1
           }
+          unzip -l "$PLUGZIP" | grep -q 'bin/agent2api-web-providers' || {
+            echo "::error::plugins.zip 里没有 bin/agent2api-web-providers"
+            exit 1
+          }
+          echo "== bundle 内插件 exe（TrollStore 将重签）=="
+          for exe in agent2api-providers agent2api-web-providers; do
+            [ -x "$APP/plugins/$exe" ] || {
+              echo "::error::bundle 内缺插件 exe：$exe"
+              exit 1
+            }
+            ls -lh "$APP/plugins/$exe"
+          done
 
       - name: 打包裸 IPA（文件名带版本号）
         run: |

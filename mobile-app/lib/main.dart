@@ -375,33 +375,29 @@ class _WebUiPageState extends State<WebUiPage> {
 
   /// 解包插件包到 `{dataDir}/plugins/` 并写注册表 plugins.json。
   ///
-  /// 插件（agent2api-providers，21+ 家 provider 的单一进程）在越狱 / TrollStore
-  /// 环境下由网关 plugin_host 用 posix_spawn 拉起。目录布局与网关 install 落盘
-  /// 一致（见 plugin_host::install 的模块头）：
-  ///
-  ///   {dataDir}/plugins/
-  ///     plugins.json                             注册表
-  ///     agent2api-providers/{version}/
-  ///       pack.json                              manifest
-  ///       bin/agent2api-providers                iOS 可执行文件
-  ///
-  /// 可执行权限不用这里管 —— 网关 `ensure_entry_executable` 会 chmod +x。
+  /// iOS 上两个插件（agent2api-providers + agent2api-web-providers）都随 App
+  /// 打包分发，但**真正被 spawn 的可执行文件在 App bundle 里**
+  /// （Runner.app/plugins/），由 TrollStore 安装时用 CoreTrust 证书重签；
+  /// 数据目录里的副本只有 ldid ad-hoc 签名、没有证书，spawn 必然 EPERM。
+  /// 所以这里的 zip 只提供 pack.json 清单与注册表落盘，让网关 bootstrap 知道
+  /// 「装了哪些插件、是否启用」，实际 spawn 走 bundle 内副本。
   Future<void> _extractPlugins(String dataPath) async {
     const version = '3.3.0-beta.5.1';
     final pluginsDir = Directory('$dataPath/plugins');
-    // 注意：不能写 `'$pluginsDir/…'` —— Directory 对象插值会变成
-    // `Directory: '/path'` 这种带前缀的字符串，拼出非法路径
-    // （cwd 是 /，最后得到 `/Directory: …`）。必须显式取 `.path`。
-    final packDir = Directory('${pluginsDir.path}/agent2api-providers/$version');
-    final exe = File('${packDir.path}/bin/agent2api-providers');
     final registry = File('${pluginsDir.path}/plugins.json');
 
-    // 已装好就跳过（避免每次启动重复解压 / 覆盖）
-    if (registry.existsSync() && exe.existsSync()) return;
+    // 已装好就跳过（两个包的 pack.json 都在才视为装好，防半途解压误判）
+    if (registry.existsSync() &&
+        File('${pluginsDir.path}/agent2api-providers/$version/pack.json').existsSync() &&
+        File('${pluginsDir.path}/agent2api-web-providers/$version/pack.json').existsSync()) {
+      return;
+    }
 
     final data = await rootBundle.load('assets/plugins.zip');
     final archive = ZipDecoder().decodeBytes(data.buffer.asUint8List());
-    final root = Directory('${packDir.path}').absolute;
+    final root = pluginsDir.absolute;
+    // 注意：不能写 `'$pluginsDir/…'` —— Directory 对象插值会变成
+    // `Directory: '/path'` 这种带前缀的字符串，拼出非法路径。必须显式取 `.path`。
     final rootPrefix = '${root.path}${Platform.pathSeparator}';
     await root.create(recursive: true);
 
@@ -422,33 +418,31 @@ class _WebUiPageState extends State<WebUiPage> {
       await out.writeAsBytes(content, flush: true);
     }
 
-    if (!exe.existsSync()) {
-      throw StateError('插件包解压后缺少 bin/agent2api-providers');
-    }
-
-    // 从 pack.json 读 provider 清单，写进注册表的 manifest_providers
+    // 逐个包从 pack.json 读 provider 清单，写进注册表的 manifest_providers
     // （网关 provider_enabled 依赖它，空表会让所有插件家被判为「未启用」）。
-    final manifest = jsonDecode(
-      await File('${root.path}/pack.json').readAsString(),
-    ) as Map<String, dynamic>;
-    final providers = manifest['providers'] as List? ?? const [];
-
-    final installed = {
-      'id': 'agent2api-providers',
-      'version': version,
-      'enabled': true,
-      'providers': <String, bool>{},
-      'entry': 'bin/agent2api-providers',
-      'sha256': '',
-      'signed': false,
-      'installed_at': DateTime.now().millisecondsSinceEpoch,
-      'manifest_providers': providers,
-    };
+    final packs = <Map<String, dynamic>>[];
+    for (final id in ['agent2api-providers', 'agent2api-web-providers']) {
+      final packJson = File('${pluginsDir.path}/$id/$version/pack.json');
+      if (!packJson.existsSync()) {
+        throw StateError('插件包解压后缺少 $id/$version/pack.json');
+      }
+      final manifest =
+          jsonDecode(await packJson.readAsString()) as Map<String, dynamic>;
+      final providers = manifest['providers'] as List? ?? const [];
+      packs.add({
+        'id': id,
+        'version': version,
+        'enabled': true,
+        'providers': <String, bool>{},
+        'entry': 'bin/$id',
+        'sha256': '',
+        'signed': false,
+        'installed_at': DateTime.now().millisecondsSinceEpoch,
+        'manifest_providers': providers,
+      });
+    }
     await registry.parent.create(recursive: true);
-    await registry.writeAsString(
-      jsonEncode({'packs': [installed]}),
-      flush: true,
-    );
+    await registry.writeAsString(jsonEncode({'packs': packs}), flush: true);
   }
 
   @override
