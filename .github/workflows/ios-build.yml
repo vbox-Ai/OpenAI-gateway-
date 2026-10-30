@@ -246,32 +246,34 @@ jobs:
       - name: 打包裸 IPA（文件名带版本号）
         run: |
           VERSION=$(grep -m1 '^version = ' desktop-tauri/src-tauri/server/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          BUILD="$GITHUB_RUN_NUMBER"
           echo "VERSION=$VERSION"
+          echo "BUILD=$BUILD"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "BUILD=$BUILD" >> "$GITHUB_ENV"
           APP=mobile-app/build/Build/Products/Release-iphoneos/Runner.app
           du -sh "$APP"
           mkdir -p mobile-app/dist/Payload
           cp -r "$APP" mobile-app/dist/Payload/
-          ( cd mobile-app/dist && zip -qry "agent2api-mobile-$VERSION.ipa" Payload && ls -lh "agent2api-mobile-$VERSION.ipa" )
+          ( cd mobile-app/dist && zip -qry "agent2api-mobile-$VERSION-build$BUILD.ipa" Payload && ls -lh "agent2api-mobile-$VERSION-build$BUILD.ipa" )
 
       - name: 上传 ipa 备份到 Actions Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: agent2api-mobile-ios
-          path: mobile-app/dist/agent2api-mobile-${{ env.VERSION }}.ipa
+          name: agent2api-mobile-ios-build${{ env.BUILD }}
+          path: mobile-app/dist/agent2api-mobile-${{ env.VERSION }}-build${{ env.BUILD }}.ipa
           if-no-files-found: error
 
-      - name: 发布裸 ipa 到 Releases（同版本覆盖、跨版本保留）
+      - name: 发布裸 ipa 到 Releases（每次 build 独立 tag）
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${{ env.VERSION }}"
-          TAG="mobile-$VERSION"
-          # 同版本重复构建（代码改了但版本号没变）要覆盖旧的 release；
-          # 跨版本（不同 TAG）各自保留，历史可回溯。
-          gh release delete "$TAG" --yes 2>/dev/null || true
-          gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/$TAG" 2>/dev/null || true
-          gh release create "$TAG" "mobile-app/dist/agent2api-mobile-$VERSION.ipa" \
-            --title "Agent2API iOS $VERSION" \
-            --notes "iOS 构建产物 $VERSION：Rust 网关整机 + 21 家插件 provider + Flutter 壳 + webview。越狱机安装：ldid -S agent2api-mobile-$VERSION.ipa" \
+          BUILD="${{ env.BUILD }}"
+          TAG="mobile-$VERSION-build$BUILD"
+          # build 号来自 GITHUB_RUN_NUMBER，每次构建递增，tag 天然唯一、不撞，
+          # 历史全部保留，靠 build 号即可判断哪一次构建出了新包。
+          gh release create "$TAG" "mobile-app/dist/agent2api-mobile-$VERSION-build$BUILD.ipa" \
+            --title "Agent2API iOS $VERSION (build $BUILD)" \
+            --notes "iOS 构建产物 $VERSION build $BUILD：Rust 网关整机 + 21 家插件 provider + Flutter 壳 + webview。越狱机安装：ldid -S agent2api-mobile-$VERSION-build$BUILD.ipa" \
             --latest
