@@ -12,7 +12,7 @@ use crate::server::core::update::client::{
 };
 use crate::server::core::update::{compare_versions, is_prerelease_version, source};
 
-pub const INDEX_REPO: &str = "Agent2plugin/Agent2plugin";
+pub const INDEX_REPO: &str = "vbox-Ai/Agent2plugin";
 pub const FALLBACK_REPO: &str = "Agent2Builder/agent2api-providers-releases";
 const GITHUB_API: &str = "https://api.github.com";
 const QUERY_TIMEOUT_MS: u64 = 30_000;
