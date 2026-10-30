@@ -118,3 +118,32 @@ Flutter App（mobile-app/）
    aarch64-apple-ios 包 + ldid entitlements 签名 → 发布进自建索引。
 3. Android 端：新开流水线（cargo-ndk 交叉编译 + DynamicLibrary.open so + APK）。
 4. 网页端：docker 部署（现成，半天事）。
+
+
+## build 25/26 + 自建插件索引（2026-10-30）
+
+- **build 25 成功**（entitlements 签名版 ipa 已出包）：tag mobile-3.3.0-beta.5.1-build25，
+  资产 agent2api-mobile-3.3.0-beta.5.1-build25.ipa。等真机验证「提供商增强」spawn；
+  若再失败，错误信息末尾「诊断：」后缀直接给结论（缺执行位 / 非 Mach-O / 无签名 / AMFI 层）。
+  用户截图的报错没有「诊断：」后缀 = 设备还在 build 24。
+- **自建插件索引路线（网页提供商 iOS 化）已落地**：
+  1. fork 上游索引 Agent2plugin/Agent2plugin 到 **vbox-Ai/Agent2plugin**（PAT 是 vbox-Ai 账号，
+     fork 直接落在 vbox-Ai 名下）。
+  2. fork 里 plugins/agent2api-web-providers.json：release.repo 改为 vbox-Ai/OpenAI-web-、
+     platforms 加 aarch64-apple-ios、version 对齐 3.3.0-beta.5.1；index.json 的 source.repo 同步改。
+     网关取 detail 的 release.repo 查 releases（走 api.github.com，不被墙），
+     tag 模板 web-v{version}、资产模板 {id}-{version}-{target}.zip。
+  3. vbox-Ai/OpenAI-web- 新增 .github/workflows/ios-release.yml（workflow_dispatch）：
+     cargo build aarch64-apple-ios --bin agent2api-web-providers → ldid -S<ent> 签名 →
+     zip（pack.json 动态补 aarch64-apple-ios entry + bin/ + assets 图标）→
+     Release tag web-v3.3.0-beta.5.1。已 dispatch。
+  4. 网关 update.rs 的 **INDEX_REPO 常量改为 vbox-Ai/Agent2plugin**（提交 43868e7，已 push vbox），
+     触发 **build 26**（含 build 25 全部修复 + 自建索引）。
+- **验证路径**：装 build 26 → 插件中心「网页提供商」应显示可下载（不再「当前平台暂无包」）→
+  下载安装 → 启用 → 看 spawn 是否成功（网页提供商与提供商增强同受 AMFI 签名约束，
+  插件包里的 exe 都必须 ldid entitlements 签名）。
+- **API 写文件套路**：无 gh CLI 时用 curl/python + PAT 走 contents API（GET 拿 sha → PUT 改文件），
+  fork 用 POST /repos/{owner}/{repo}/forks；workflow dispatch 用 POST .../dispatches。
+  PowerShell 的 curl -d 单引号 JSON 会炸（Problems parsing JSON），用 python urllib。
+- **Read 工具读中文文件名会挂死**（阶段5-iOS真机联调.md 两次 630s 超时），
+  读/改记忆点用 Shell Get-Content / python 代替。
