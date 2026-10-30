@@ -157,3 +157,28 @@ Flutter App（mobile-app/）
   所以截图上「提供商增强」EPERM 无诊断后缀 + 「网页提供商暂无包」都是旧包表现。
 - 判定真机版本的锚点：装了 build 26 后，网页提供商卡片应能下载安装；
   提供商增强若再 EPERM，错误尾部必有「诊断：」结论。
+
+## build 27：插件 exe 随 bundle 分发（真根因 + 修法，2026-10-30）
+
+- **真根因（推翻 build 24-26 的 entitlements 判断）**：下载 build 26 ipa 解包，
+  解析 exe 的 Mach-O 签名 —— LC_CODE_SIGNATURE 在、entitlements 在
+  （slot 5 = fade7171，platform-application/no-container/get-task-allow/
+  skip-library-validation 全齐），但 **CodeDirectory flags = 0x0**，且 ldid
+  2.1.5 的 -C 选项根本没有 platform/adhoc 组合（读源码确认）。但 flags=0
+  不是致命点 —— **致命点是 ad-hoc（NoSigner）签名没有证书**。
+- **TrollStore 签名机制（读 opa334/TrollStore 源码确认）**：TrollStore 安装时
+  signApp 用 NSDirectoryEnumerator 递归扫 bundle、ldid -s 递归重签所有
+  Mach-O，再对**每个**二进制 pply_coretrust_bypass（用内置 CA 证书重签 CMS
+  签名 blob）。所以带 TrollStore 证书链的二进制 AMFI 才放行；数据目录里的
+  ldid ad-hoc 副本无证书，spawn 必 EPERM。
+- **修法**：两个插件 exe（agent2api-providers + agent2api-web-providers）打进
+  Runner.app/plugins/（workflow 在 xcodebuild 后注入），TrollStore 安装时
+  递归重签它们。网关 plugin_host 在 iOS 上 undled_plugin_exe()（用
+  current_exe 反推 bundle 路径）优先 spawn bundle 内副本，数据目录副本只做
+  清单/注册表落盘。网页提供商改为随 plugins.zip 预装（与提供商增强同路），
+  不再走插件中心下载。
+- 提交 986c702 已 push，**build 27 已 dispatch**（含双插件 bundle + 双包
+  plugins.zip + iOS spawn 走 bundle + 诊断文案修正）。
+- 网页提供商「未通过官方签名校验」是**加速下载（Mirror 源）强制验签**的
+  网关安全特性（update.rs L516：candidate.source == Mirror 时 require_signed），
+  自建包无官方 ed25519 私钥签不了。bundle 预装后不再走下载，自然绕开。
