@@ -182,3 +182,24 @@ Flutter App（mobile-app/）
 - 网页提供商「未通过官方签名校验」是**加速下载（Mirror 源）强制验签**的
   网关安全特性（update.rs L516：candidate.source == Mirror 时 require_signed），
   自建包无官方 ed25519 私钥签不了。bundle 预装后不再走下载，自然绕开。
+
+## build 30 出包：插件 exe 随 bundle 分发（2026-10-30）
+
+- **build 30 成功**：tag mobile-3.3.0-beta.5.1-build30，ipa 31.9MB。
+  解包验证：`Payload/Runner.app/plugins/agent2api-providers` +
+  `agent2api-web-providers` 都在；entitlements = platform-application /
+  no-container / container-required=false / skip-library-validation（已去掉
+  get-task-allow —— iOS 16+ 无开发者模式时它会让二进制起不来，
+  TrollStore RootHelper 就是不带它）；plugins.zip 含两个包、完整 pack.json、
+  provider_category=web、各 30 / 2 家 provider。
+- **build 27/28 失败教训**：
+  1. build 27 exit 134 —— `ldid -Shelper.entitlements` 在 `cd` 进插件仓库后
+     是相对路径 → 找不到文件 → ldid `_assert(): errno=2` abort。改成
+     `ENT="$RUNNER_TEMP/helper.entitlements"` 绝对路径。
+  2. build 28/29 是主动 cancel 的（补 pack.json 全字段 + 去 get-task-allow）。
+- **本机 github.com:443 被墙（push/pull 全 reset）**，api.github.com 正常 →
+  用 contents API PUT 单文件提交推送 workflow 改动。
+  因此**本地 main 与远端可能分叉**，网络恢复后先
+  `git fetch vbox && git reset --hard vbox/main`。
+- **验证路径**：装 build 30 → 插件中心「提供商增强」「网页提供商」都显示已启用；
+  提供商增强不再 EPERM（spawn 的是 bundle 内被 TrollStore 重签的副本）。
