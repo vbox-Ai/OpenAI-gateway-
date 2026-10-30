@@ -130,6 +130,13 @@ jobs:
           git checkout v3.3.0-beta.5.1 2>/dev/null || true
           cargo build --release --target aarch64-apple-ios --bin agent2api-providers
           ls -lh target/aarch64-apple-ios/release/agent2api-providers
+          # 给插件 exe 打 ad-hoc 签名：iOS 的 AMFI 要求被 posix_spawn 的二进制
+          # 有有效代码签名，否则即使父 App 已 platformize 也会 EPERM。TrollStore
+          # 只重签 bundle 内 Mach-O，运行时解压到 Documents 的裸二进制不受它管，
+          # 必须在打包前自己签好（ad-hoc 签名嵌入 Mach-O，解压/拷贝不破坏）。
+          brew install ldid 2>/dev/null || true
+          ldid -S "target/aarch64-apple-ios/release/agent2api-providers"
+          echo "signed agent2api-providers"
           # 打 iOS 插件 zip：pack.json（补 aarch64-apple-ios entry）+ bin/agent2api-providers。
           # 首版不打包插件 UI 资源（icons/ui），聚焦 provider 转发跑通；签到中心
           # 的插件页面后续补。

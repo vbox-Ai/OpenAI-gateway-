@@ -173,7 +173,7 @@ class _WebUiPageState extends State<WebUiPage> {
   Future<void> _doExport({required String name, required String data}) async {
     try {
       final bytes = base64Decode(data);
-      final base = await _resolveDataDir();
+      final base = await _resolveExportDir();
       final exports = Directory('${base.path}/Exports');
       await exports.create(recursive: true);
       // 文件名只取末尾一段，防路径注入
@@ -303,6 +303,23 @@ class _WebUiPageState extends State<WebUiPage> {
     final tmp = Directory.systemTemp;
     await tmp.create(recursive: true);
     return tmp;
+  }
+
+  /// 导出目录：优先 Documents（UIFileSharingEnabled 只对 Documents 生效，
+  /// 用户才能在系统「文件」App 里看到并拷出）。TrollStore no-container 下
+  /// Documents 解析异常时退回数据目录。
+  Future<Directory> _resolveExportDir() async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final path = dir.path;
+      if (path.isNotEmpty && path != '/' && path != '//') {
+        await Directory(path).create(recursive: true);
+        return Directory(path);
+      }
+    } catch (_) {
+      // 落到下面的数据目录兜底
+    }
+    return _resolveDataDir();
   }
 
   /// 轮询 /health：`server::start` 只保证 bind，监听任务异步起来。

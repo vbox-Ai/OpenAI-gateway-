@@ -118,6 +118,9 @@ pub(super) fn target_triple() -> String {
         // Windows 的 GNU ABI 我们也发（CI 只出 msvc 包，但保留分支让将来可加）
         "windows" => format!("{arch}-pc-windows-msvc"),
         "macos" => format!("{arch}-apple-darwin"),
+        // iOS（移动端嵌入形态）：否则落到下面的 linux 分支，插件中心会按
+        // linux-gnu 下载/匹配 ELF 包，装上后 spawn 直接 EPERM
+        "ios" => format!("{arch}-apple-ios"),
         // Linux / 其它一律按 gnu ABI：与 `pack.mjs` 的默认分支一致
         _ => format!("{arch}-unknown-linux-gnu"),
     }
