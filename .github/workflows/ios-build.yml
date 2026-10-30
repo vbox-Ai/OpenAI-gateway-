@@ -135,8 +135,25 @@ jobs:
           # 只重签 bundle 内 Mach-O，运行时解压到 Documents 的裸二进制不受它管，
           # 必须在打包前自己签好（ad-hoc 签名嵌入 Mach-O，解压/拷贝不破坏）。
           brew install ldid 2>/dev/null || true
-          ldid -S "target/aarch64-apple-ios/release/agent2api-providers"
-          echo "signed agent2api-providers"
+          # 裸 `ldid -S`（纯 ad-hoc、无 entitlements）在 iOS 真机上仍会被 AMFI
+          # 拒绝 spawn（EPERM）—— build 24 实测：exe 有 LC_CODE_SIGNATURE 却照样
+          # Operation not permitted。TrollStore 社区 spawn helper 的标准配方是
+          # ad-hoc 签名 + entitlements（platform-application / no-container 等），
+          # 子进程的 entitlements 与 platformized 父进程不匹配时 AMFI 直接杀。
+          cat > helper.entitlements <<'PLEOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>platform-application</key><true/>
+            <key>com.apple.private.security.no-container</key><true/>
+            <key>get-task-allow</key><true/>
+            <key>com.apple.private.skip-library-validation</key><true/>
+          </dict>
+          </plist>
+          PLEOF
+          ldid -Shelper.entitlements "target/aarch64-apple-ios/release/agent2api-providers"
+          echo "signed agent2api-providers (ad-hoc + entitlements)"
           # 打 iOS 插件 zip：pack.json（补 aarch64-apple-ios entry）+ bin/agent2api-providers。
           # 首版不打包插件 UI 资源（icons/ui），聚焦 provider 转发跑通；签到中心
           # 的插件页面后续补。

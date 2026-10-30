@@ -80,10 +80,41 @@ Flutter App（mobile-app/）
 - plugins.json 的 `manifest_providers` 必填（否则 provider_enabled 全判未启用）。
 - 插件是**单个 exe 承载 21+ 家 provider**（`agent2api-providers`），不是每家长一个。
 
+## build 24 真机验尸（2026-10-30，EPERM 未消）
+
+- **现象**：「提供商增强」仍报 `启动插件进程失败（agent2api-providers）：Operation not permitted (os error 1)`。
+- **验尸方法（本地可复用）**：下载 release ipa → Python 解 zip → 解析 exe Mach-O
+  load commands 找 `LC_CODE_SIGNATURE`（cmd=0x1d）。**结论：exe 有签名**，ldid 生效了。
+- **新结论：裸 `ldid -S`（无 entitlements 的纯 ad-hoc）不够**。iOS AMFI 对被
+  posix_spawn 的二进制不只查签名，还查 entitlements 与 platformized 父进程的
+  匹配 —— 这是 TrollStore 社区 spawn helper 的已知坑，标准配方是
+  `ldid -S<ent.plist>`，entitlements 至少含：
+  `platform-application`、`com.apple.private.security.no-container`、
+  `get-task-allow`、`com.apple.private.skip-library-validation`。
+  修复已进 workflow（build 25 起）。
+- **「未签名」黄标 ≠ Mach-O 签名**：UI 的已签名/未签名指 **pack.json 的
+  ed25519 包签名**（`official-2026` 公钥，验签在 install.rs）。自打包
+  plugins.zip 没有私钥，永远显示未签名 —— 无害，别再往 Mach-O 上猜。
+- **spawn 失败现在带设备侧自诊断**（`lifecycle.rs::ios_spawn_diagnostics`，
+  iOS-only）：错误信息会附加「缺执行位 / 不是 Mach-O / 无代码签名 / AMFI 层」
+  四选一结论，下次用户贴截图即得答案。
+- **插件目录来源确认**：插件中心卡片数据来自**上游硬编码索引**
+  `Agent2plugin/Agent2plugin`（`update.rs::INDEX_REPO`，raw.githubusercontent
+  的 index.json + detail 文件）。`vbox-Ai/OpenAI-` releases 为空，用户设备上
+  的 提供商增强 只能来自 ipa 自带解包 —— 不存在「channel 覆盖坏包」的可能。
+- **网页提供商**：界面已正确显示「aarch64-apple-ios 当前平台暂无包」（平台
+  识别修复生效）。要让它可装，需把 INDEX_REPO 指到自己的索引仓库（fork
+  Agent2plugin + 改常量），并给 `OpenAI-web-` 出 aarch64-apple-ios 包。
+- **下载墙坑**：release 资产（objects.githubusercontent.com）直连被 reset，
+  `mirror.ghproxy.com` DNS 不通，**`https://ghfast.top/` 前缀可用**；gh CLI
+  本机不存在，用 `curl.exe + PAT` 走 api.github.com（API 域没被墙）。
+
 ## 下一步
 
-1. iOS 真机验证：装 build 24+，看「提供商增强」30 家 provider 是否 spawn 成功；
-   「网页提供商」是之前装坏的 Linux 包，用户需在插件中心卸载，后续单独出 iOS 版。
-2. Android 端：新开流水线（cargo-ndk 交叉编译 + DynamicLibrary.open so + APK）。
-3. 网页端：docker 部署（现成，半天事）。
-4. 网页插件 iOS 版：`vbox-Ai/OpenAI-web-` 也编 aarch64-apple-ios + ldid 签名。
+1. iOS 真机验证：装 build 25+（entitlements 签名版），看「提供商增强」是否
+   spawn 成功；若仍 EPERM，错误信息里的「诊断：」后缀会直接指明成因。
+2. 网页插件 iOS 版：fork `Agent2plugin/Agent2plugin` 到 vbox-Ai → `update.rs`
+   的 `INDEX_REPO` 改指向（建议做成配置可覆盖）→ 给 `OpenAI-web-` 出
+   aarch64-apple-ios 包 + ldid entitlements 签名 → 发布进自建索引。
+3. Android 端：新开流水线（cargo-ndk 交叉编译 + DynamicLibrary.open so + APK）。
+4. 网页端：docker 部署（现成，半天事）。

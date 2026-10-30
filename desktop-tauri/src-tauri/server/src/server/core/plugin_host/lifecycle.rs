@@ -108,7 +108,18 @@ impl Host {
         command.creation_flags(0x0800_0000);
         if let Some(dir) = &self.options.cwd { command.current_dir(dir); }
         let mut child = command.spawn().map_err(|error| {
-            let message = process::redact(&format!("启动插件进程失败（{}）：{error}", self.executable()));
+            // iOS 上 spawn 被拒（EPERM）几乎全是 AMFI 层的问题；把设备侧能自查
+            // 的证据直接拼进错误信息，用户贴截图即可定位，不用远程猜。
+            #[cfg(target_os = "ios")]
+            let diagnostics = ios_spawn_diagnostics(&self.options.exe);
+            #[cfg(not(target_os = "ios"))]
+            let diagnostics = String::new();
+            let message = process::redact(&format!(
+                "启动插件进程失败（{}）：{error}{}{}",
+                self.executable(),
+                if diagnostics.is_empty() { "" } else { "。" },
+                diagnostics
+            ));
             self.note_failure(&message);
             message
         })?;
@@ -292,4 +303,65 @@ impl Host {
             }
         }
     }
+}
+
+/// iOS spawn 失败的设备侧诊断。
+///
+/// EPERM（os error 1）在 iOS 上几乎不可能是普通文件系统错误 —— 沙盒/AMFI 拒绝
+/// exec 都报这个码。区分三种可自查的成因，把答案直接拼进用户看得到的错误里：
+///   1. 入口缺执行位（chmod 没生效，通常报 EACCES，但顺手一并查）；
+///   2. 不是 Mach-O（装错平台的包，ELF 也报 EPERM/EACCES）；
+///   3. Mach-O 但没有 LC_CODE_SIGNATURE（打包时 ldid 没跑成）。
+/// 三者都正常则指向 AMFI entitlements/签名信任问题（需更新 ipa 重装）。
+#[cfg(target_os = "ios")]
+fn ios_spawn_diagnostics(exe: &std::path::Path) -> String {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut hints: Vec<String> = Vec::new();
+    match std::fs::metadata(exe) {
+        Ok(metadata) => {
+            if metadata.permissions().mode() & 0o111 == 0 {
+                hints.push("入口缺执行权限".to_string());
+            }
+            match std::fs::read(exe) {
+                Ok(bytes) => {
+                    let is_macho = bytes.len() >= 32
+                        && (bytes[0..4] == [0xcf, 0xfa, 0xed, 0xfe]
+                            || bytes[0..4] == [0xce, 0xfa, 0xed, 0xfe]
+                            || bytes[0..4] == [0xca, 0xfe, 0xba, 0xbe]);
+                    if !is_macho {
+                        hints.push("入口不是 Mach-O 二进制（可能装了其他平台的包）".to_string());
+                    } else if !macho_has_code_signature(&bytes) {
+                        hints.push("Mach-O 无代码签名（LC_CODE_SIGNATURE 缺失，打包时 ldid 未生效）".to_string());
+                    }
+                }
+                Err(error) => hints.push(format!("读取入口二进制失败：{error}")),
+            }
+        }
+        Err(error) => hints.push(format!("入口文件不存在：{error}")),
+    }
+    if hints.is_empty() {
+        "诊断：入口存在、可执行、带代码签名 —— EPERM 来自系统 AMFI 层，需要安装带最新插件签名修复的 ipa（旧包里的 exe 缺 entitlements，无法直接修复）".to_string()
+    } else {
+        format!("诊断：{}", hints.join("；"))
+    }
+}
+
+/// 遍历 Mach-O load commands，找 LC_CODE_SIGNATURE（cmd = 0x1d）。
+/// 只解析 64 位（0xfeedfacf）；fat 二进制首魔数 0xcafebabe 时不深入，直接
+/// 返回 true（提交签名问题在 CI 阶段就能发现，不该走到这里）。
+#[cfg(target_os = "ios")]
+fn macho_has_code_signature(bytes: &[u8]) -> bool {
+    if bytes.len() < 32 || bytes[0..4] != [0xcf, 0xfa, 0xed, 0xfe] { return true; }
+    let ncmds = u32::from_le_bytes(bytes[16..20].try_into().unwrap()) as usize;
+    let mut off = 32usize;
+    for _ in 0..ncmds {
+        if off + 8 > bytes.len() { return false; }
+        let cmd = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
+        let size = u32::from_le_bytes(bytes[off + 4..off + 8].try_into().unwrap()) as usize;
+        if cmd == 0x1d { return true; }
+        if size == 0 { return false; }
+        off += size;
+    }
+    false
 }
