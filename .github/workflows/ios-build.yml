@@ -162,32 +162,27 @@ jobs:
           echo "signed agent2api-web-providers"
 
           # ── 3) 打组合 plugins.zip：两个包各自 pack.json + bin/ ──────
+          # pack.json 写**完整清单**（只补 aarch64-apple-ios 入口）：网关的
+          # ownership::category 要读 provider_category，渠道/兼容性判断要读别的
+          # 字段，裁字段会让网页提供商被当成 Agent 类。
           python3 - <<'PYEOF'
           import json, zipfile, os
           out = os.path.join(os.environ['GITHUB_WORKSPACE'], 'mobile-app', 'assets')
           os.makedirs(out, exist_ok=True)
+          temp = os.environ['RUNNER_TEMP']
           with zipfile.ZipFile(os.path.join(out, 'plugins.zip'), 'w', zipfile.ZIP_DEFLATED) as z:
-              # 插件 A：providers
-              with open(os.path.join(os.environ['RUNNER_TEMP'], 'providers', 'pack.json'), encoding='utf-8') as f:
-                  ma = json.load(f)
-              ma['entry']['aarch64-apple-ios'] = 'bin/agent2api-providers'
-              ka = {k: ma.get(k) for k in ('id', 'name', 'version', 'protocol', 'providers', 'entry')}
-              z.writestr('agent2api-providers/%s/pack.json' % ma['version'],
-                         json.dumps(ka, ensure_ascii=False, indent=2))
-              z.write(os.path.join(os.environ['RUNNER_TEMP'], 'providers',
-                                   'target/aarch64-apple-ios/release/agent2api-providers'),
-                      'agent2api-providers/%s/bin/agent2api-providers' % ma['version'])
-              # 插件 B：网页提供商
-              with open(os.path.join(os.environ['RUNNER_TEMP'], 'web', 'pack.json'), encoding='utf-8') as f:
-                  mb = json.load(f)
-              mb['entry']['aarch64-apple-ios'] = 'bin/agent2api-web-providers'
-              kb = {k: mb.get(k) for k in ('id', 'name', 'version', 'protocol', 'providers', 'entry')}
-              z.writestr('agent2api-web-providers/%s/pack.json' % mb['version'],
-                         json.dumps(kb, ensure_ascii=False, indent=2))
-              z.write(os.path.join(os.environ['RUNNER_TEMP'], 'web',
-                                   'target/aarch64-apple-ios/release/agent2api-web-providers'),
-                      'agent2api-web-providers/%s/bin/agent2api-web-providers' % mb['version'])
-          print('plugins.zip done (providers + web-providers)')
+              for pack_id, sub, binname in (
+                  ('agent2api-providers', 'providers', 'agent2api-providers'),
+                  ('agent2api-web-providers', 'web', 'agent2api-web-providers'),
+              ):
+                  with open(os.path.join(temp, sub, 'pack.json'), encoding='utf-8') as f:
+                      manifest = json.load(f)
+                  manifest.setdefault('entry', {})['aarch64-apple-ios'] = 'bin/%s' % binname
+                  z.writestr('%s/%s/pack.json' % (pack_id, manifest['version']),
+                             json.dumps(manifest, ensure_ascii=False, indent=2))
+                  z.write(os.path.join(temp, sub, 'target/aarch64-apple-ios/release', binname),
+                          '%s/%s/bin/%s' % (pack_id, manifest['version'], binname))
+                  print('packed', pack_id, manifest['version'])
           PYEOF
           ls -lh "$GITHUB_WORKSPACE/mobile-app/assets/plugins.zip"
 
