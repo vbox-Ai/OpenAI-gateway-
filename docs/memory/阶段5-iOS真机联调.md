@@ -147,3 +147,13 @@ Flutter App（mobile-app/）
   PowerShell 的 curl -d 单引号 JSON 会炸（Problems parsing JSON），用 python urllib。
 - **Read 工具读中文文件名会挂死**（阶段5-iOS真机联调.md 两次 630s 超时），
   读/改记忆点用 Shell Get-Content / python 代替。
+
+## build 26 出包确认（2026-10-30 12:45）
+
+- 网关 build 26 成功：tag mobile-3.3.0-beta.5.1-build26，资产 agent2api-mobile-3.3.0-beta.5.1-build26.ipa。
+- OpenAI-web- ios-release 成功：Release web-v3.3.0-beta.5.1 带
+  agent2api-web-providers-3.3.0-beta.5.1-aarch64-apple-ios.zip。
+- 用户 10:39（=02:39 UTC）装的是旧包（build 26 完成于 04:45 UTC），
+  所以截图上「提供商增强」EPERM 无诊断后缀 + 「网页提供商暂无包」都是旧包表现。
+- 判定真机版本的锚点：装了 build 26 后，网页提供商卡片应能下载安装；
+  提供商增强若再 EPERM，错误尾部必有「诊断：」结论。
