@@ -18,7 +18,9 @@ const STDERR_LINE_CHARS: usize = 512;
 pub(super) struct ProcessRun {
     pub generation: u64,
     pub pid: Option<u32>,
-    child: tokio::sync::Mutex<tokio::process::Child>,
+    // 进程内模式（iOS）没有真实子进程：`None` 表示「无子进程句柄」，
+    // `reap` 直接返回正常退出。独立进程模式始终 `Some`。
+    child: tokio::sync::Mutex<Option<tokio::process::Child>>,
     expected_exit: Mutex<Option<Instant>>,
     pub failed: AtomicBool,
     pub retired: AtomicBool,
@@ -74,10 +76,12 @@ impl ExitReport {
 }
 
 impl ProcessRun {
-    pub fn new(generation: u64, child: tokio::process::Child) -> Self {
+    /// `child`：独立进程模式传 `Some(child)`；进程内模式（iOS）传 `None`。
+    pub fn new(generation: u64, child: Option<tokio::process::Child>) -> Self {
+        let pid = child.as_ref().and_then(|child| child.id());
         Self {
             generation,
-            pid: child.id(),
+            pid,
             child: tokio::sync::Mutex::new(child),
             expected_exit: Mutex::new(None),
             failed: AtomicBool::new(false),
@@ -126,11 +130,21 @@ impl ProcessRun {
     }
 
     pub async fn reap(&self, grace: Duration) -> ExitReport {
-        let mut child = self.child.lock().await;
+        let mut child_guard = self.child.lock().await;
+        let Some(child) = child_guard.as_mut() else {
+            // 进程内模式：无真实子进程，直接返回「正常退出」。
+            let report = ExitReport {
+                status: None,
+                forced: false,
+                wait_error: None,
+            };
+            if let Ok(mut saved) = self.exit_report.lock() { *saved = Some(report.clone()); }
+            return report;
+        };
         if let Some(report) = self.exit_report.lock().ok().and_then(|report| report.clone()) {
             if report.status.is_some() { return report; }
         }
-        let report = reap(&mut child, grace).await;
+        let report = reap(child, grace).await;
         if let Ok(mut saved) = self.exit_report.lock() { *saved = Some(report.clone()); }
         report
     }

@@ -98,56 +98,100 @@ impl Host {
         }
         *self.inner.lock().await = None;
 
-        let mut command = tokio::process::Command::new(&self.options.exe);
-        command.args(&self.options.args)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        #[cfg(windows)]
-        command.creation_flags(0x0800_0000);
-        if let Some(dir) = &self.options.cwd { command.current_dir(dir); }
-        let mut child = command.spawn().map_err(|error| {
-            // iOS 上 spawn 被拒（EPERM）几乎全是 AMFI 层的问题；把设备侧能自查
-            // 的证据直接拼进错误信息，用户贴截图即可定位，不用远程猜。
-            #[cfg(target_os = "ios")]
-            let diagnostics = ios_spawn_diagnostics(&self.options.exe);
-            #[cfg(not(target_os = "ios"))]
-            let diagnostics = String::new();
-            let message = process::redact(&format!(
-                "启动插件进程失败（{}）：{error}{}{}",
-                self.executable(),
-                if diagnostics.is_empty() { "" } else { "。" },
-                diagnostics
-            ));
-            self.note_failure(&message);
-            message
-        })?;
-        let stdin = child.stdin.take();
-        let stdout = child.stdout.take();
-        let (Some(stdin), Some(stdout)) = (stdin, stdout) else {
-            let _ = process::reap(&mut child, Duration::ZERO).await;
-            let message = "插件进程没有完整的 stdin/stdout 管道";
-            self.note_failure(message);
-            return Err(message.to_string());
+        // ── 执行体启动：iOS 进程内 / 其它平台 spawn ──────────────
+        #[cfg(target_os = "ios")]
+        let run = {
+            // iOS 沙箱禁止 spawn 子进程，走进程内：duplex 内存管道 + serve_inprocess。
+            // 两对管道：网关→插件（写端 gw_to_plugin / 读端 serve_reader），
+            //          插件→网关（写端 serve_writer / 读端 gw_reader）。
+            let (gw_to_plugin, serve_reader) = tokio::io::duplex(1 << 20);
+            let (serve_writer, gw_reader) = tokio::io::duplex(1 << 20);
+
+            let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+            // 进程内无真实子进程：ProcessRun 的 child 为 None。
+            let run = Arc::new(ProcessRun::new(generation, None));
+            *self.inner.lock().await = Some(Inner {
+                stdin: Arc::new(Mutex::new(Box::new(gw_to_plugin))),
+                run: run.clone(),
+            });
+            {
+                let _state = self.lifecycle.lock().unwrap_or_else(|error| error.into_inner());
+                *self.active.lock().unwrap_or_else(|error| error.into_inner()) = Some(run.clone());
+                self.running.store(true, Ordering::Release);
+            }
+
+            // serve_inprocess 阻塞直到 EOF/shutdown，跑在独立 task 里。
+            // 它的退出通过「写端 drop → 网关读 EOF」传导给 read_loop，这里只防泄漏。
+            tokio::spawn(async move {
+                let result = agent2api_providers::serve_inprocess(
+                    Box::new(serve_reader),
+                    Box::new(serve_writer),
+                ).await;
+                if let Err(error) = &result {
+                    crate::server::logging::log("Plugin", &format!("进程内 provider 宿主退出：{error}"));
+                }
+            });
+
+            // 网关读循环用 gw_reader（serve 退出时其写端 drop，读到 EOF）。
+            // 进程内无独立 stderr 通道：空任务占位。
+            let host = self.clone();
+            let reader_run = run.clone();
+            let gw_reader: Box<dyn tokio::io::AsyncRead + Unpin + Send> = Box::new(gw_reader);
+            let stderr_task = tokio::spawn(async {});
+            tokio::spawn(async move {
+                host.read_loop(proto::frame::buffered(gw_reader), reader_run, stderr_task).await;
+            });
+
+            run
         };
-        let stderr = child.stderr.take();
-        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
-        let run = Arc::new(ProcessRun::new(generation, child));
-        *self.inner.lock().await = Some(Inner {
-            stdin: Arc::new(Mutex::new(stdin)), run: run.clone(),
-        });
-        {
-            let _state = self.lifecycle.lock().unwrap_or_else(|error| error.into_inner());
-            *self.active.lock().unwrap_or_else(|error| error.into_inner()) = Some(run.clone());
-            self.running.store(true, Ordering::Release);
-        }
-        let stderr_task = process::drain_stderr(run.clone(), stderr);
-        let host = self.clone();
-        let reader_run = run.clone();
-        tokio::spawn(async move {
-            host.read_loop(proto::frame::buffered(stdout), reader_run, stderr_task).await;
-        });
+
+        #[cfg(not(target_os = "ios"))]
+        let run = {
+            let mut command = tokio::process::Command::new(&self.options.exe);
+            command.args(&self.options.args)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true);
+            #[cfg(windows)]
+            command.creation_flags(0x0800_0000);
+            if let Some(dir) = &self.options.cwd { command.current_dir(dir); }
+            let mut child = command.spawn().map_err(|error| {
+                let message = process::redact(&format!(
+                    "启动插件进程失败（{}）：{error}",
+                    self.executable(),
+                ));
+                self.note_failure(&message);
+                message
+            })?;
+            let stdin = child.stdin.take();
+            let stdout = child.stdout.take();
+            let (Some(stdin), Some(stdout)) = (stdin, stdout) else {
+                let _ = process::reap(&mut child, Duration::ZERO).await;
+                let message = "插件进程没有完整的 stdin/stdout 管道";
+                self.note_failure(message);
+                return Err(message.to_string());
+            };
+            let stderr = child.stderr.take();
+            let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+            let run = Arc::new(ProcessRun::new(generation, Some(child)));
+            *self.inner.lock().await = Some(Inner {
+                stdin: Arc::new(Mutex::new(Box::new(stdin))), run: run.clone(),
+            });
+            {
+                let _state = self.lifecycle.lock().unwrap_or_else(|error| error.into_inner());
+                *self.active.lock().unwrap_or_else(|error| error.into_inner()) = Some(run.clone());
+                self.running.store(true, Ordering::Release);
+            }
+            let stderr_task = process::drain_stderr(run.clone(), stderr);
+            let host = self.clone();
+            let reader_run = run.clone();
+            let reader: Box<dyn tokio::io::AsyncRead + Unpin + Send> = Box::new(stdout);
+            tokio::spawn(async move {
+                host.read_loop(proto::frame::buffered(reader), reader_run, stderr_task).await;
+            });
+            run
+        };
 
         let env = proto::HostEnv {
             data_dir: self.options.data_dir.clone(), host_version: self.options.host_version.clone(),
@@ -190,7 +234,7 @@ impl Host {
 
     async fn read_loop(
         self: Arc<Self>,
-        mut reader: tokio::io::BufReader<tokio::process::ChildStdout>,
+        mut reader: tokio::io::BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>,
         run: Arc<ProcessRun>,
         mut stderr_task: tokio::task::JoinHandle<()>,
     ) {
@@ -305,78 +349,3 @@ impl Host {
     }
 }
 
-/// iOS spawn 失败的设备侧诊断。
-///
-/// EPERM（os error 1）在 iOS 上几乎不可能是普通文件系统错误 —— 沙盒/AMFI 拒绝
-/// exec 都报这个码。区分三种可自查的成因，把答案直接拼进用户看得到的错误里：
-///   1. 入口缺执行位（chmod 没生效，通常报 EACCES，但顺手一并查）；
-///   2. 不是 Mach-O（装错平台的包，ELF 也报 EPERM/EACCES）；
-///   3. Mach-O 但没有 LC_CODE_SIGNATURE（打包时 ldid 没跑成）。
-/// 三者都正常则指向沙盒拒绝 spawn：build31 起根因是**父进程（App 主二进制）缺
-/// platform-application 权限**，内核在 sandbox_check(exec) 拒绝 posix_spawn。
-///
-/// build31 起诊断前缀会带 `spawn=bundle|data` 标记：bundle = 实际 spawn 的是
-/// Runner.app/plugins/ 内的副本，data = 数据目录副本。据此可确认路径选择是否符合
-/// 预期，不再只报「入口存在、可执行、带代码签名」这种无法区分来源的模糊结论。
-#[cfg(target_os = "ios")]
-fn ios_spawn_diagnostics(exe: &std::path::Path) -> String {
-    use std::os::unix::fs::PermissionsExt;
-
-    // 来源判定：bundle 内副本路径含 `Runner.app` 或 `plugins` 段，其余归 data。
-    let path_str = exe.to_string_lossy();
-    let spawn_mark = if path_str.contains("Runner.app") || path_str.contains("/plugins/") {
-        "spawn=bundle"
-    } else {
-        "spawn=data"
-    };
-
-    let mut hints: Vec<String> = Vec::new();
-    match std::fs::metadata(exe) {
-        Ok(metadata) => {
-            if metadata.permissions().mode() & 0o111 == 0 {
-                hints.push("入口缺执行权限".to_string());
-            }
-            match std::fs::read(exe) {
-                Ok(bytes) => {
-                    let is_macho = bytes.len() >= 32
-                        && (bytes[0..4] == [0xcf, 0xfa, 0xed, 0xfe]
-                            || bytes[0..4] == [0xce, 0xfa, 0xed, 0xfe]
-                            || bytes[0..4] == [0xca, 0xfe, 0xba, 0xbe]);
-                    if !is_macho {
-                        hints.push("入口不是 Mach-O 二进制（可能装了其他平台的包）".to_string());
-                    } else if !macho_has_code_signature(&bytes) {
-                        hints.push("Mach-O 无代码签名（LC_CODE_SIGNATURE 缺失，打包时 ldid 未生效）".to_string());
-                    }
-                }
-                Err(error) => hints.push(format!("读取入口二进制失败：{error}")),
-            }
-        }
-        Err(error) => hints.push(format!("入口文件不存在：{error}")),
-    }
-    if hints.is_empty() {
-        format!(
-            "诊断：{spawn_mark}，入口存在、可执行、带代码签名 —— EPERM 来自系统沙盒层，父进程缺 platform-application 权限（sandbox_check(exec) 拒绝 posix_spawn）。需装 build31 起给 Runner 主二进制补了 platform entitlements 的 ipa（App 本体由 TrollStore 按主二进制 entitlements 下发 platform 权限）"
-        )
-    } else {
-        format!("诊断：{spawn_mark}，{}", hints.join("；"))
-    }
-}
-
-/// 遍历 Mach-O load commands，找 LC_CODE_SIGNATURE（cmd = 0x1d）。
-/// 只解析 64 位（0xfeedfacf）；fat 二进制首魔数 0xcafebabe 时不深入，直接
-/// 返回 true（提交签名问题在 CI 阶段就能发现，不该走到这里）。
-#[cfg(target_os = "ios")]
-fn macho_has_code_signature(bytes: &[u8]) -> bool {
-    if bytes.len() < 32 || bytes[0..4] != [0xcf, 0xfa, 0xed, 0xfe] { return true; }
-    let ncmds = u32::from_le_bytes(bytes[16..20].try_into().unwrap()) as usize;
-    let mut off = 32usize;
-    for _ in 0..ncmds {
-        if off + 8 > bytes.len() { return false; }
-        let cmd = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
-        let size = u32::from_le_bytes(bytes[off + 4..off + 8].try_into().unwrap()) as usize;
-        if cmd == 0x1d { return true; }
-        if size == 0 { return false; }
-        off += size;
-    }
-    false
-}

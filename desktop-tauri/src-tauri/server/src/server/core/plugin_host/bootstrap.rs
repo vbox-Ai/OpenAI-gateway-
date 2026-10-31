@@ -406,31 +406,23 @@ async fn start_pack(
         .and_then(|manifest| install::entry_for_target(manifest, &super::rpc::target_triple()))
         .unwrap_or_else(|| pack.entry.clone());
     let data_exe = dir.join(&entry);
-    // iOS 上插件 exe 必须随 App bundle 分发：TrollStore 在安装时用自己的
-    // CoreTrust 证书重签 bundle 内每一个 Mach-O，被 posix_spawn 拉起才能通过
-    // AMFI。运行时解压到数据目录的裸二进制只有 ldid ad-hoc 签名、没有
-    // TrollStore 证书链，spawn 必然 EPERM（build 24-26 真机实测）。所以优先
-    // 用 bundle 内的副本，数据目录那份只是清单/注册表的落盘载体。
-    let exe = {
-        #[cfg(target_os = "ios")]
-        {
-            bundled_plugin_exe(&pack.id).unwrap_or_else(|| data_exe.clone())
+    // iOS 走进程内嵌入：provider 实现已编进网关静态库，不再 spawn 插件 exe，
+    // 因此无需检查/选择 exe 文件（bundle 分发与可执行位检查都是 spawn 路线的
+    // 前置条件，进程内路线用不到）。其它平台维持 spawn 路线不变。
+    let exe = data_exe.clone();
+    #[cfg(not(target_os = "ios"))]
+    {
+        if !exe.exists() {
+            logging::log(
+                "Plugin",
+                &format!("插件入口不存在（{}），跳过", exe.display()),
+            );
+            return None;
         }
-        #[cfg(not(target_os = "ios"))]
-        {
-            data_exe.clone()
+        if let Err(reason) = super::packages::ensure_entry_executable(&exe) {
+            logging::log("Plugin", &format!("插件包「{}」不可用：{reason}", pack.id));
+            return None;
         }
-    };
-    if !exe.exists() {
-        logging::log(
-            "Plugin",
-            &format!("插件入口不存在（{}），跳过", exe.display()),
-        );
-        return None;
-    }
-    if let Err(reason) = super::packages::ensure_entry_executable(&exe) {
-        logging::log("Plugin", &format!("插件包「{}」不可用：{reason}", pack.id));
-        return None;
     }
 
     let options = HostOptions {
@@ -538,21 +530,6 @@ pub fn set_loopback_port(port: u16) {
 /// 取网关监听端口（未写入时为 `0`，插件据此走「拿不到回调地址」分支）。
 fn loopback_port() -> u16 {
     LOOPBACK_PORT.get().copied().unwrap_or(0)
-}
-
-/// iOS：定位 bundle 内随 App 分发的插件 exe（`Runner.app/plugins/{id}`）。
-///
-/// ── 为什么必须走 bundle ─────────────────────────────────────
-/// TrollStore 安装时用自己的 CoreTrust 证书重签 bundle 内**每一个** Mach-O，
-/// 只有带这套证书链的二进制被 posix_spawn 拉起时 AMFI 才放行。数据目录里的
-/// 副本是 ldid ad-hoc 签名（无证书），spawn 必 EPERM。bundle 路径由
-/// `current_exe()` 反推：进程即 `Runner.app/Runner`，其父目录就是 bundle。
-#[cfg(target_os = "ios")]
-fn bundled_plugin_exe(id: &str) -> Option<std::path::PathBuf> {
-    let current = std::env::current_exe().ok()?;
-    let bundle = current.parent()?;
-    let exe = bundle.join("plugins").join(id);
-    exe.exists().then_some(exe)
 }
 
 /// 插件 provider 的 `ProviderKind` 占位。

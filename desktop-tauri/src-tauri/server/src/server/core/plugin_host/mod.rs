@@ -288,9 +288,10 @@ pub struct Host {
     callbacks: Arc<dyn GatewayCallbacks>,
 }
 
-/// 子进程与它的管道。
+/// 子进程（或进程内执行体）与它的管道。
 struct Inner {
-    stdin: Arc<Mutex<tokio::process::ChildStdin>>,
+    // 写端：独立进程 = ChildStdin，进程内（iOS）= duplex 管道写端，都包成 trait object。
+    stdin: Arc<Mutex<Box<dyn tokio::io::AsyncWrite + Unpin + Send + Sync>>>,
     run: Arc<process::ProcessRun>,
 }
 

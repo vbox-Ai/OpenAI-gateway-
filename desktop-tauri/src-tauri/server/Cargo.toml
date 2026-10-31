@@ -158,6 +158,17 @@ bcrypt = "0.15"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 ed25519-dalek = { version = "2", default-features = false, features = ["fast", "std"] }
 
+# ── iOS 进程内嵌入：provider 实现编成静态库链进 Runner ─────────
+# iOS 沙箱禁止 spawn 子进程，所以 iOS 版不 spawn 插件 exe，而是把 provider
+# 实现（agent2api-providers）作为库直接链接进网关，plugin_host 走「进程内」
+# 分支（duplex 内存管道 + serve_inprocess）。这只在 iOS 目标生效，桌面端/
+# 服务端/Docker 构建完全不受影响。
+#
+# 依赖 vbox fork 的 poc-inprocess 分支（含 serve_inprocess 入口）。落地后
+# 应打 tag 并改用 tag 引用，避免依赖会动的分支。
+[target.'cfg(target_os = "ios")'.dependencies]
+agent2api-providers = { git = "https://github.com/vbox-Ai/OpenAI-", branch = "poc-inprocess", default-features = false, features = ["workbuddy", "raccoon"] }
+
 # AutoClaw 凭证解密的 DPAPI（providers/autoclaw/crypto.rs）。仅 Windows
 # 目标生效；其它平台该适配器的「导入桌面端登录态」是桩实现。
 [target.'cfg(windows)'.dependencies]
