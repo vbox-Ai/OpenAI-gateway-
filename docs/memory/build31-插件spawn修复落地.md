@@ -1,0 +1,45 @@
+# build31 —— iOS 插件 spawn EPERM 修复落地
+
+> 归档时间：2026-10-31
+> 提交：`80a5ea1`（已推 `vbox-Ai/OpenAI-gateway-` 的 `main`）
+> 关联：`iOS插件spawn-根因与方案.md`（根因分析）、`iOS插件spawn-上下文总结.md`（时间线）
+
+---
+
+## 一、这次落了什么（三处改动）
+
+根因文档里 build31 方案（给 Runner 主二进制补 platform entitlements）**已落到代码并提交**：
+
+| # | 文件 | 改动 |
+|---|---|---|
+| 1 | `.github/workflows/ios-build.yml` | 新增「给 Runner 主二进制补 platform entitlements」步骤：xcodebuild 后、打 ipa 前，`ldid -S` 给 `Runner.app/Runner` 补 `platform-application` / `no-container` / `container-required=false` / `no-sandbox` / `skip-library-validation` / `get-task-allow` 六项。让 TrollStore 读主二进制 entitlements 并下发全 bundle，不再命中「兜底签名」分支。 |
+| 2 | `.github/workflows/ios-build.yml` | 收敛插件 exe（子进程）的 entitlements：去掉 platform-application 等宽权限，只留 `get-task-allow`。避免子进程权限过宽触发 iOS 16+ 开发者模式检查。 |
+| 3 | `desktop-tauri/src-tauri/server/src/server/core/plugin_host/lifecycle.rs` | `ios_spawn_diagnostics` 加 `spawn=bundle|data` 标记（按 exe 路径是否含 `Runner.app` / `/plugins/` 判定来源）；诊断文案从「缺 TrollStore 证书链」更新为「父进程缺 platform-application 权限（sandbox_check(exec) 拒绝 posix_spawn）」。 |
+
+## 二、行尾规范化（顺带）
+
+`ios-build.yml` 历史上是**混合行尾**（275 CRLF + 70 LF）。本次编辑时统一为**纯 LF**，与 `.gitattributes` 对 `.githooks/**` 的 `eol=lf` 规范意图一致，也符合 git `core.autocrlf=true` 期望 LF 入库的方向。之后不再有此问题。
+
+> 实质改动（`git diff -w`）为 36 增 / 5 删；其余 diff 全是行尾规范化噪声。
+
+## 三、下一步（未做，需人工）
+
+1. **触发 iOS 构建**：GitHub 上手动 `workflow_dispatch` 跑 `iOS 构建与发布`，产出 build N 的 ipa。
+2. **真机验证**：装机后看插件中心——
+   - 「提供商增强」应显示 `已运行 / 已加载 30 家`；
+   - 「网页提供商」应 `已运行 / 已加载 2 家`；
+   - 若仍失败，错误尾部「诊断：」带 `spawn=bundle` 标记（= 路径选择正确但 platform 权限仍未生效），据此走备选路线。
+
+## 四、备选路线（若 build31 仍 EPERM，按优先级）
+
+| # | 路线 | 代价 |
+|---|---|---|
+| 1 | app 级 platform 权限仍不够 → TrollStore spawn-helper 配方（`libtrollstore` / `spawnRoot` / XPC） | 中 |
+| 2 | 绕开 spawn：provider 增强编成静态库链进 Runner，plugin_host 走进程内 FFI 分支 | 大，Android 也能复用 |
+| 3 | 降级：iOS 版把 provider 直接编进网关，放弃插件热插拔 | 最大，一劳永逸 |
+
+## 五、工程侧提醒（本次踩坑记录）
+
+- **推送凭据**：本机 git 默认凭据（`hf805864818`）无 `vbox-Ai` 写权限，推送被 403。已用 `vbox-Ai` 的 PAT 一次性 URL 推送成功。注意：该 PAT 曾出现在对话里，**需尽快轮换**。
+- **`github.com:443` 直连仍 reset**：clone/push 走 `ghfast.top` 镜像前缀；`api.github.com` 正常。
+- **本机无 cargo/gh**：无法本地 `cargo check` 或 `gh run list`，编译验证依赖 GitHub Actions。
