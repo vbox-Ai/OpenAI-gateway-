@@ -55,7 +55,7 @@
 | build30 | 无签名 → TrollStore 兜底（普通沙箱） | App 正常启动，插件 spawn EPERM（缺 platform） |
 | build31 | platform + **no-container** + no-sandbox + skip-library-validation + get-task-allow | ❌ Flutter `LaunchEngine.acquireEngine()` abort 闪退（no-container 让 App 失去容器，资源路径解析失败） |
 | build32 | 仅 platform-application | App 正常启动，插件 spawn 仍 EPERM（`spawn=bundle` 路径正确，但 sandbox_check(exec) 仍拒 —— platform-application 不解除沙箱） |
-| build33 | platform + **no-sandbox** + container-required=false（保留容器） | 构建中，待真机验证 |
+| build33 | platform + **no-sandbox** + container-required=false（保留容器） | ✅ 编译通过（run #33，ipa 已出），待真机验证 spawn |
 
 **核心结论**：`no-container` 是闪退凶手（去掉容器 → Flutter 崩），`platform-application` 单独不够（沙箱仍拦 exec）。正确组合是**保留容器 + 去沙箱强制**（no-sandbox + container-required=false），即 TrollStore RootHelper 的实际配方。子进程（插件 exe）同步恢复 platform-application（AMFI 要求 platform 父 spawn 的子进程本身也是 platform 二进制）。
 
@@ -66,3 +66,9 @@
 - 合并后核验：iOS 专属补丁全部保留（`lib.rs` FFI 入口、`bootstrap.rs` bundled_plugin_exe、`lifecycle.rs` spawn=bundle 诊断、`crate-type=["staticlib","rlib"]`、mobile-app、ios-build.yml）。
 - 插件克隆 ref 对齐 beta.6：providers 优先 vbox fork beta.6 tag → 回退上游 Agent2Providers v3.3.0-beta.6 → main 兜底。
 - 注意：vbox 插件仓库（OpenAI-/OpenAI-web-）**尚未打 beta.6 tag**，CI 靠回退上游 tag 保证协议同版本。
+
+## 八、build33 构建结果（2026-10-31）
+
+- run #33 全绿（22 步 success），ipa `agent2api-mobile-3.3.0-beta.6-build33.ipa`（32,293,789 bytes）已发布，tag `mobile-3.3.0-beta.6-build33`。
+- 关键闸门验证通过：beta.6 合并后的 Rust 代码在 iOS arm64 编译通过；协议 crate `v3.3.0-beta.6` 拉取成功且与 beta.5.1 **零接口变更**（上游 plugin_host 目录与 provider-protocol crate 均无改动）；插件 beta.6 克隆回退链（vbox fork → 上游 Agent2Providers）工作正常。
+- **待办（硬依赖用户真机）**：装机验证 ① 能否启动 ② 插件 spawn 是否还 EPERM。这是判定「修复成功」的唯一依据，无法由构建结果代替。
