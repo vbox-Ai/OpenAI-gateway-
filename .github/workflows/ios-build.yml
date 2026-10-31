@@ -271,39 +271,6 @@ jobs:
           chmod +x "$APP/plugins/agent2api-providers" "$APP/plugins/agent2api-web-providers"
           ls -lh "$APP/plugins/"
 
-      - name: 给 Runner 主二进制补 platform entitlements（build31 核心修复）
-        run: |
-          # build 24-30 EPERM 真根因：xcodebuild 用了 CODE_SIGNING_ALLOWED=NO，
-          # Runner 主二进制**完全没有代码签名**。TrollStore 安装时读不到主二进制
-          # 的 entitlements，命中它的「兜底签名」分支，把 App 签成普通沙箱应用
-          # —— 没有 platform-application，内核在 sandbox_check(exec) 直接拒绝
-          # posix_spawn，返回 EPERM（不是 AMFI，也不是文件权限）。
-          #
-          # 修法：在打 ipa 之前，给主二进制单独补 platform entitlements（ldid -S）。
-          # TrollStore 会读主二进制自带的 entitlements 并下发给全 bundle，兜底分支
-          # 不再命中，整套 platform 权限跟着 App 走。只签主二进制，不递归 bundle。
-          #
-          # ⚠️ build32 教训：只留 platform-application 时 App 能启动，但插件 spawn
-          # 仍 EPERM —— sandbox_check(exec) 拒绝的是沙箱配置，platform-application
-          # 不解除沙箱。⚠️ build31 教训：no-container 会让 Flutter 引擎启动即崩
-          # （App 失去容器，资源路径解析失败）。build33 折中：保留容器（Flutter 能
-          # 起），去掉沙箱强制（sandbox 放行 exec）—— 这正是 TrollStore RootHelper
-          # entitlements 的实际组合（no-sandbox + container-required=false）。
-          APP=mobile-app/build/Build/Products/Release-iphoneos/Runner.app
-          cat > "$RUNNER_TEMP/app.entitlements" <<'PLEOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>platform-application</key><true/>
-            <key>com.apple.private.security.no-sandbox</key><true/>
-            <key>com.apple.private.security.container-required</key><false/>
-          </dict>
-          </plist>
-          PLEOF
-          ldid -S"$RUNNER_TEMP/app.entitlements" "$APP/Runner"
-          echo "signed Runner main binary with platform-application entitlement"
-
       - name: 校验产物（符号已链接 + Web UI 已打进 bundle）
         run: |
           APP=mobile-app/build/Build/Products/Release-iphoneos/Runner.app
