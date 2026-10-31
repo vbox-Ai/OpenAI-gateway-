@@ -128,17 +128,19 @@ jobs:
           brew install ldid 2>/dev/null || true
           # entitlements 写绝对路径：后面会 cd 进两个插件仓库，相对路径会变成
           # 「在插件仓库里找不到」，ldid 直接 abort（errno=2 → exit 134）。
+          #
+          # build31 关键收敛：插件 exe（子进程）只留 get-task-allow，不再带
+          # platform-application / no-container / no-sandbox / skip-library-validation
+          # 这套宽权限。platform 权限应归属**父进程（Runner 主二进制）**，由它
+          # 放行 posix_spawn；子进程权限过宽会触发 iOS 16+ 开发者模式检查，反而
+          # 起不来（见 docs/memory/iOS插件spawn-根因与方案.md §4.1）。
           ENT="$RUNNER_TEMP/helper.entitlements"
           cat > "$ENT" <<'PLEOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
-            <key>platform-application</key><true/>
-            <key>com.apple.private.security.no-container</key><true/>
-            <key>com.apple.private.security.container-required</key><false/>
-            <key>com.apple.private.security.no-sandbox</key><true/>
-            <key>com.apple.private.skip-library-validation</key><true/>
+            <key>get-task-allow</key><true/>
           </dict>
           </plist>
           PLEOF
@@ -262,6 +264,35 @@ jobs:
              "$APP/plugins/agent2api-web-providers"
           chmod +x "$APP/plugins/agent2api-providers" "$APP/plugins/agent2api-web-providers"
           ls -lh "$APP/plugins/"
+
+      - name: 给 Runner 主二进制补 platform entitlements（build31 核心修复）
+        run: |
+          # build 24-30 EPERM 真根因：xcodebuild 用了 CODE_SIGNING_ALLOWED=NO，
+          # Runner 主二进制**完全没有代码签名**。TrollStore 安装时读不到主二进制
+          # 的 entitlements，命中它的「兜底签名」分支，把 App 签成普通沙箱应用
+          # —— 没有 platform-application，内核在 sandbox_check(exec) 直接拒绝
+          # posix_spawn，返回 EPERM（不是 AMFI，也不是文件权限）。
+          #
+          # 修法：在打 ipa 之前，给主二进制单独补 platform entitlements（ldid -S）。
+          # TrollStore 会读主二进制自带的 entitlements 并下发给全 bundle，兜底分支
+          # 不再命中，整套 platform 权限跟着 App 走。只签主二进制，不递归 bundle。
+          APP=mobile-app/build/Build/Products/Release-iphoneos/Runner.app
+          cat > "$RUNNER_TEMP/app.entitlements" <<'PLEOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>platform-application</key><true/>
+            <key>com.apple.private.security.no-container</key><true/>
+            <key>com.apple.private.security.container-required</key><false/>
+            <key>com.apple.private.security.no-sandbox</key><true/>
+            <key>com.apple.private.skip-library-validation</key><true/>
+            <key>get-task-allow</key><true/>
+          </dict>
+          </plist>
+          PLEOF
+          ldid -S"$RUNNER_TEMP/app.entitlements" "$APP/Runner"
+          echo "signed Runner main binary with platform entitlements"
 
       - name: 校验产物（符号已链接 + Web UI 已打进 bundle）
         run: |

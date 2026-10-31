@@ -312,10 +312,23 @@ impl Host {
 ///   1. 入口缺执行位（chmod 没生效，通常报 EACCES，但顺手一并查）；
 ///   2. 不是 Mach-O（装错平台的包，ELF 也报 EPERM/EACCES）；
 ///   3. Mach-O 但没有 LC_CODE_SIGNATURE（打包时 ldid 没跑成）。
-/// 三者都正常则指向 AMFI entitlements/签名信任问题（需更新 ipa 重装）。
+/// 三者都正常则指向沙盒拒绝 spawn：build31 起根因是**父进程（App 主二进制）缺
+/// platform-application 权限**，内核在 sandbox_check(exec) 拒绝 posix_spawn。
+///
+/// build31 起诊断前缀会带 `spawn=bundle|data` 标记：bundle = 实际 spawn 的是
+/// Runner.app/plugins/ 内的副本，data = 数据目录副本。据此可确认路径选择是否符合
+/// 预期，不再只报「入口存在、可执行、带代码签名」这种无法区分来源的模糊结论。
 #[cfg(target_os = "ios")]
 fn ios_spawn_diagnostics(exe: &std::path::Path) -> String {
     use std::os::unix::fs::PermissionsExt;
+
+    // 来源判定：bundle 内副本路径含 `Runner.app` 或 `plugins` 段，其余归 data。
+    let path_str = exe.to_string_lossy();
+    let spawn_mark = if path_str.contains("Runner.app") || path_str.contains("/plugins/") {
+        "spawn=bundle"
+    } else {
+        "spawn=data"
+    };
 
     let mut hints: Vec<String> = Vec::new();
     match std::fs::metadata(exe) {
@@ -341,9 +354,11 @@ fn ios_spawn_diagnostics(exe: &std::path::Path) -> String {
         Err(error) => hints.push(format!("入口文件不存在：{error}")),
     }
     if hints.is_empty() {
-        "诊断：入口存在、可执行、带代码签名 —— EPERM 来自系统 AMFI 层。这个二进制是 ldid ad-hoc 签名、没有 TrollStore 的 CoreTrust 证书链，spawn 必然被拒；需装 bundle 分发的 ipa（插件 exe 随 Runner.app 打包，由 TrollStore 安装时重签）".to_string()
+        format!(
+            "诊断：{spawn_mark}，入口存在、可执行、带代码签名 —— EPERM 来自系统沙盒层，父进程缺 platform-application 权限（sandbox_check(exec) 拒绝 posix_spawn）。需装 build31 起给 Runner 主二进制补了 platform entitlements 的 ipa（App 本体由 TrollStore 按主二进制 entitlements 下发 platform 权限）"
+        )
     } else {
-        format!("诊断：{}", hints.join("；"))
+        format!("诊断：{spawn_mark}，{}", hints.join("；"))
     }
 }
 
