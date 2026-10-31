@@ -382,16 +382,11 @@ class _WebUiPageState extends State<WebUiPage> {
   /// 所以这里的 zip 只提供 pack.json 清单与注册表落盘，让网关 bootstrap 知道
   /// 「装了哪些插件、是否启用」，实际 spawn 走 bundle 内副本。
   Future<void> _extractPlugins(String dataPath) async {
-    const version = '3.3.0-beta.5.1';
+    // 版本号**不能写死**：workflow 打包 plugins.zip 时从插件仓库的 pack.json
+    // 读版本（随上游 tag 变化）。写死 beta.5.1 而上游出 beta.6 后，解压目录
+    // 对不上，报「缺少 pack.json」。改为：先解压，再扫描目录动态发现版本。
     final pluginsDir = Directory('$dataPath/plugins');
     final registry = File('${pluginsDir.path}/plugins.json');
-
-    // 已装好就跳过（两个包的 pack.json 都在才视为装好，防半途解压误判）
-    if (registry.existsSync() &&
-        File('${pluginsDir.path}/agent2api-providers/$version/pack.json').existsSync() &&
-        File('${pluginsDir.path}/agent2api-web-providers/$version/pack.json').existsSync()) {
-      return;
-    }
 
     final data = await rootBundle.load('assets/plugins.zip');
     final archive = ZipDecoder().decodeBytes(data.buffer.asUint8List());
@@ -418,14 +413,25 @@ class _WebUiPageState extends State<WebUiPage> {
       await out.writeAsBytes(content, flush: true);
     }
 
-    // 逐个包从 pack.json 读 provider 清单，写进注册表的 manifest_providers
-    // （网关 provider_enabled 依赖它，空表会让所有插件家被判为「未启用」）。
+    // 逐个包动态发现版本：扫 `plugins/<包id>/` 下的版本目录，取 pack.json
+    // 存在的那个（zip 里每个包只有一个版本目录）。
     final packs = <Map<String, dynamic>>[];
     for (final id in ['agent2api-providers', 'agent2api-web-providers']) {
-      final packJson = File('${pluginsDir.path}/$id/$version/pack.json');
-      if (!packJson.existsSync()) {
-        throw StateError('插件包解压后缺少 $id/$version/pack.json');
+      final packRoot = Directory('${pluginsDir.path}/$id');
+      String? version;
+      if (packRoot.existsSync()) {
+        for (final entry in packRoot.listSync()) {
+          if (entry is! Directory) continue;
+          if (File('${entry.path}/pack.json').existsSync()) {
+            version = entry.path.split(Platform.pathSeparator).last;
+            break;
+          }
+        }
       }
+      if (version == null) {
+        throw StateError('插件包解压后缺少 $id/<版本>/pack.json');
+      }
+      final packJson = File('${pluginsDir.path}/$id/$version/pack.json');
       final manifest =
           jsonDecode(await packJson.readAsString()) as Map<String, dynamic>;
       final providers = manifest['providers'] as List? ?? const [];
