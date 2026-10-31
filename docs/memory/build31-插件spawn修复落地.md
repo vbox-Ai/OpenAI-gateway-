@@ -72,3 +72,38 @@
 - run #33 全绿（22 步 success），ipa `agent2api-mobile-3.3.0-beta.6-build33.ipa`（32,293,789 bytes）已发布，tag `mobile-3.3.0-beta.6-build33`。
 - 关键闸门验证通过：beta.6 合并后的 Rust 代码在 iOS arm64 编译通过；协议 crate `v3.3.0-beta.6` 拉取成功且与 beta.5.1 **零接口变更**（上游 plugin_host 目录与 provider-protocol crate 均无改动）；插件 beta.6 克隆回退链（vbox fork → 上游 Agent2Providers）工作正常。
 - **待办（硬依赖用户真机）**：装机验证 ① 能否启动 ② 插件 spawn 是否还 EPERM。这是判定「修复成功」的唯一依据，无法由构建结果代替。
+
+## 九、build33 闪退 + entitlements 路线证伪 + 进程内 POC（2026-10-31）
+
+### 闪退根因（build33 崩溃日志确认）
+
+build33 与 build31 崩溃完全一致：`LaunchEngine.acquireEngine()` → `abort()`。结合四轮实证：
+
+| entitlements | Flutter 启动 | spawn |
+|---|---|---|
+| 无签名（build30） | ✅ | ❌ EPERM |
+| 仅 platform（build32） | ✅ | ❌ EPERM |
+| platform + no-container（build31） | ❌ 闪退 | - |
+| platform + no-sandbox + container-required=false（build33） | ❌ 闪退 | - |
+
+**核心矛盾（刚性）**：Flutter 引擎需要完整沙箱容器才能初始化，`posix_spawn` 需要解除沙箱，两者在 iOS 17 上互斥。**entitlements 路线已被四轮实证证伪**。
+
+### 架构真相
+
+30 家 provider 的**转发实现不在网关仓库，全在插件 exe（`agent2api-providers`）**里；网关本体只有"身份"（枚举 + id），转发靠 spawn 子进程。所以插件 spawn 失败 = 30 家全部 503「需要安装插件」。
+
+### 进程内运行 POC（决定性验证通过）
+
+正确解法：**绕开 spawn**，把 provider 实现编成静态库链进 Runner，用内存管道（`tokio::io::duplex`）在进程内跑 `serve`。
+
+- 插件仓库 `OpenAI-` 的 `poc-inprocess` 分支：
+  - `provider-sdk`：`ServeOptions` 加 `reader`/`writer`/`in_process`，serve I/O 可注入
+  - `providers`：`Cargo.toml` 加 `[lib] crate-type=["staticlib","rlib"]` + `bin` feature；`lib.rs` 加 `serve_inprocess(reader, writer)` + `run_standalone()`
+  - `inprocess_probe` example：运行时验证握手全链路
+- **验证结果（ci-check run #10 全绿）**：进程内 serve 收到 INIT → 返回 3 家 provider（raccoon + workbuddy 双版）→ PING 正常 → shutdown（drop 写端触发 EOF）正常退出。**证明不 spawn 也能完整跑 provider RPC**。
+
+### 剩余落地工作
+
+1. 网关 plugin_host 加进程内分支（iOS 用 duplex + serve_inprocess 替代 spawn）
+2. iOS 构建把 providers 静态库链进 Runner
+3. 真机验证 WorkBuddy 实际转发
