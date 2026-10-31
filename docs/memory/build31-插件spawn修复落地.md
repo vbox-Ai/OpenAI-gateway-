@@ -43,3 +43,26 @@
 - **推送凭据**：本机 git 默认凭据（`hf805864818`）无 `vbox-Ai` 写权限，推送被 403。已用 `vbox-Ai` 的 PAT 一次性 URL 推送成功。注意：该 PAT 曾出现在对话里，**需尽快轮换**。
 - **`github.com:443` 直连仍 reset**：clone/push 走 `ghfast.top` 镜像前缀；`api.github.com` 正常。
 - **本机无 cargo/gh**：无法本地 `cargo check` 或 `gh run list`，编译验证依赖 GitHub Actions。
+
+---
+
+## 六、build30 → 33 实证迭代链（entitlements 组合）
+
+真机验证驱动，每轮一个结论：
+
+| 版本 | 主二进制 entitlements | 结果 |
+|---|---|---|
+| build30 | 无签名 → TrollStore 兜底（普通沙箱） | App 正常启动，插件 spawn EPERM（缺 platform） |
+| build31 | platform + **no-container** + no-sandbox + skip-library-validation + get-task-allow | ❌ Flutter `LaunchEngine.acquireEngine()` abort 闪退（no-container 让 App 失去容器，资源路径解析失败） |
+| build32 | 仅 platform-application | App 正常启动，插件 spawn 仍 EPERM（`spawn=bundle` 路径正确，但 sandbox_check(exec) 仍拒 —— platform-application 不解除沙箱） |
+| build33 | platform + **no-sandbox** + container-required=false（保留容器） | 构建中，待真机验证 |
+
+**核心结论**：`no-container` 是闪退凶手（去掉容器 → Flutter 崩），`platform-application` 单独不够（沙箱仍拦 exec）。正确组合是**保留容器 + 去沙箱强制**（no-sandbox + container-required=false），即 TrollStore RootHelper 的实际配方。子进程（插件 exe）同步恢复 platform-application（AMFI 要求 platform 父 spawn 的子进程本身也是 platform 二进制）。
+
+## 七、上游 beta.6 同步（2026-10-31）
+
+- 合并上游 `v3.3.0-beta.6` tag 进 fork main（`b9b8cd6`），**零冲突**。
+- 网关版本 → 3.3.0-beta.6，协议 crate tag → v3.3.0-beta.6（上游 Agent2Providers 已有该 tag）。
+- 合并后核验：iOS 专属补丁全部保留（`lib.rs` FFI 入口、`bootstrap.rs` bundled_plugin_exe、`lifecycle.rs` spawn=bundle 诊断、`crate-type=["staticlib","rlib"]`、mobile-app、ios-build.yml）。
+- 插件克隆 ref 对齐 beta.6：providers 优先 vbox fork beta.6 tag → 回退上游 Agent2Providers v3.3.0-beta.6 → main 兜底。
+- 注意：vbox 插件仓库（OpenAI-/OpenAI-web-）**尚未打 beta.6 tag**，CI 靠回退上游 tag 保证协议同版本。
