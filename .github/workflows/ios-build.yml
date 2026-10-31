@@ -129,29 +129,34 @@ jobs:
           # entitlements 写绝对路径：后面会 cd 进两个插件仓库，相对路径会变成
           # 「在插件仓库里找不到」，ldid 直接 abort（errno=2 → exit 134）。
           #
-          # build31 关键收敛：插件 exe（子进程）只留 get-task-allow，不再带
-          # platform-application / no-container / no-sandbox / skip-library-validation
-          # 这套宽权限。platform 权限应归属**父进程（Runner 主二进制）**，由它
-          # 放行 posix_spawn；子进程权限过宽会触发 iOS 16+ 开发者模式检查，反而
-          # 起不来（见 docs/memory/iOS插件spawn-根因与方案.md §4.1）。
+          # build33 恢复：插件 exe（子进程）带 platform-application。AMFI 规则：
+          # platform 父进程 spawn 的子进程本身也必须是 platform 二进制，否则拒绝。
+          # build31 曾把子进程收敛到只剩 get-task-allow（非 platform），这在父进程
+          # 还没有沙箱豁免时是雪上加霜。no-sandbox 给子进程自己的 exec 资源放行
+          # （子进程 stdio 管道与数据目录读写都需要）。
           ENT="$RUNNER_TEMP/helper.entitlements"
           cat > "$ENT" <<'PLEOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
-            <key>get-task-allow</key><true/>
+            <key>platform-application</key><true/>
+            <key>com.apple.private.security.no-sandbox</key><true/>
+            <key>com.apple.private.security.container-required</key><false/>
           </dict>
           </plist>
           PLEOF
 
           # ── 1) agent2api-providers（21+ 家 provider 的单一进程）────────
+          # beta.6：优先克隆 vbox fork 的 beta.6 tag（若已打），否则上游
+          # Agent2Providers 的 v3.3.0-beta.6（协议同版本，构建等价），再兜底 main。
           mkdir -p "$RUNNER_TEMP/providers"
-          git clone --depth 1 --branch v3.3.0-beta.5.1 \
+          git clone --depth 1 --branch v3.3.0-beta.6 \
             https://github.com/vbox-Ai/OpenAI-.git "$RUNNER_TEMP/providers" 2>/dev/null \
+            || git clone --depth 1 --branch v3.3.0-beta.6 \
+            https://github.com/ProvidersPlugin/Agent2Providers.git "$RUNNER_TEMP/providers" 2>/dev/null \
             || git clone --depth 1 https://github.com/vbox-Ai/OpenAI-.git "$RUNNER_TEMP/providers"
           cd "$RUNNER_TEMP/providers"
-          git checkout v3.3.0-beta.5.1 2>/dev/null || true
           cargo build --release --target aarch64-apple-ios --bin agent2api-providers
           ldid -S"$ENT" "target/aarch64-apple-ios/release/agent2api-providers"
           echo "signed agent2api-providers"
@@ -160,6 +165,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/web"
           git clone --depth 1 https://github.com/vbox-Ai/OpenAI-web-.git "$RUNNER_TEMP/web"
           cd "$RUNNER_TEMP/web"
+          git checkout web-v3.3.0-beta.5.1 2>/dev/null || git checkout main 2>/dev/null || true
           cargo build --release --target aarch64-apple-ios --bin agent2api-web-providers
           ldid -S"$ENT" "target/aarch64-apple-ios/release/agent2api-web-providers"
           echo "signed agent2api-web-providers"
@@ -273,17 +279,16 @@ jobs:
           # —— 没有 platform-application，内核在 sandbox_check(exec) 直接拒绝
           # posix_spawn，返回 EPERM（不是 AMFI，也不是文件权限）。
           #
-          # 修法：在打 ipa 之前，给主二进制单独补 platform-application（ldid -S）。
+          # 修法：在打 ipa 之前，给主二进制单独补 platform entitlements（ldid -S）。
           # TrollStore 会读主二进制自带的 entitlements 并下发给全 bundle，兜底分支
-          # 不再命中，platform 权限跟着 App 走。只签主二进制，不递归 bundle。
+          # 不再命中，整套 platform 权限跟着 App 走。只签主二进制，不递归 bundle。
           #
-          # ⚠️ build31.1 修正：只保留 platform-application。build31 曾把
-          # no-container / no-sandbox / container-required=false 一起塞进去，导致
-          # App 变成「无容器无沙箱」，Flutter 引擎在 LaunchEngine.acquireEngine()
-          # 阶段无法初始化资源、abort 闪退（build30 无签名走 TrollStore 兜底 = 普通
-          # 沙箱，能正常启动）。这三个键是给 TrollStore 的 RootHelper 类纯工具 App
-          # 用的，不能加到跑 Flutter 引擎的正常 App 上。get-task-allow /
-          # skip-library-validation 也一并去掉，避免 iOS 16+ 开发者模式检查干扰。
+          # ⚠️ build32 教训：只留 platform-application 时 App 能启动，但插件 spawn
+          # 仍 EPERM —— sandbox_check(exec) 拒绝的是沙箱配置，platform-application
+          # 不解除沙箱。⚠️ build31 教训：no-container 会让 Flutter 引擎启动即崩
+          # （App 失去容器，资源路径解析失败）。build33 折中：保留容器（Flutter 能
+          # 起），去掉沙箱强制（sandbox 放行 exec）—— 这正是 TrollStore RootHelper
+          # entitlements 的实际组合（no-sandbox + container-required=false）。
           APP=mobile-app/build/Build/Products/Release-iphoneos/Runner.app
           cat > "$RUNNER_TEMP/app.entitlements" <<'PLEOF'
           <?xml version="1.0" encoding="UTF-8"?>
@@ -291,6 +296,8 @@ jobs:
           <plist version="1.0">
           <dict>
             <key>platform-application</key><true/>
+            <key>com.apple.private.security.no-sandbox</key><true/>
+            <key>com.apple.private.security.container-required</key><false/>
           </dict>
           </plist>
           PLEOF
