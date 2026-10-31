@@ -166,8 +166,11 @@ ed25519-dalek = { version = "2", default-features = false, features = ["fast", "
 #
 # 依赖 vbox fork 的 poc-inprocess 分支（含 serve_inprocess 入口）。落地后
 # 应打 tag 并改用 tag 引用，避免依赖会动的分支。
-[target.'cfg(target_os = "ios")'.dependencies]
-agent2api-providers = { git = "https://github.com/vbox-Ai/OpenAI-", branch = "poc-inprocess", default-features = false, features = ["workbuddy", "raccoon"] }
+#
+# ⚠️ A/B 验证（build36）：临时注释，确认 providers 依赖是否导致 Flutter 闪退。
+# 验证后恢复。
+#[target.'cfg(target_os = "ios")'.dependencies]
+#agent2api-providers = { git = "https://github.com/vbox-Ai/OpenAI-", branch = "poc-inprocess", default-features = false, features = ["workbuddy", "raccoon"] }
 
 # AutoClaw 凭证解密的 DPAPI（providers/autoclaw/crypto.rs）。仅 Windows
 # 目标生效；其它平台该适配器的「导入桌面端登录态」是桩实现。
