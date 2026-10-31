@@ -273,9 +273,17 @@ jobs:
           # —— 没有 platform-application，内核在 sandbox_check(exec) 直接拒绝
           # posix_spawn，返回 EPERM（不是 AMFI，也不是文件权限）。
           #
-          # 修法：在打 ipa 之前，给主二进制单独补 platform entitlements（ldid -S）。
+          # 修法：在打 ipa 之前，给主二进制单独补 platform-application（ldid -S）。
           # TrollStore 会读主二进制自带的 entitlements 并下发给全 bundle，兜底分支
-          # 不再命中，整套 platform 权限跟着 App 走。只签主二进制，不递归 bundle。
+          # 不再命中，platform 权限跟着 App 走。只签主二进制，不递归 bundle。
+          #
+          # ⚠️ build31.1 修正：只保留 platform-application。build31 曾把
+          # no-container / no-sandbox / container-required=false 一起塞进去，导致
+          # App 变成「无容器无沙箱」，Flutter 引擎在 LaunchEngine.acquireEngine()
+          # 阶段无法初始化资源、abort 闪退（build30 无签名走 TrollStore 兜底 = 普通
+          # 沙箱，能正常启动）。这三个键是给 TrollStore 的 RootHelper 类纯工具 App
+          # 用的，不能加到跑 Flutter 引擎的正常 App 上。get-task-allow /
+          # skip-library-validation 也一并去掉，避免 iOS 16+ 开发者模式检查干扰。
           APP=mobile-app/build/Build/Products/Release-iphoneos/Runner.app
           cat > "$RUNNER_TEMP/app.entitlements" <<'PLEOF'
           <?xml version="1.0" encoding="UTF-8"?>
@@ -283,16 +291,11 @@ jobs:
           <plist version="1.0">
           <dict>
             <key>platform-application</key><true/>
-            <key>com.apple.private.security.no-container</key><true/>
-            <key>com.apple.private.security.container-required</key><false/>
-            <key>com.apple.private.security.no-sandbox</key><true/>
-            <key>com.apple.private.skip-library-validation</key><true/>
-            <key>get-task-allow</key><true/>
           </dict>
           </plist>
           PLEOF
           ldid -S"$RUNNER_TEMP/app.entitlements" "$APP/Runner"
-          echo "signed Runner main binary with platform entitlements"
+          echo "signed Runner main binary with platform-application entitlement"
 
       - name: 校验产物（符号已链接 + Web UI 已打进 bundle）
         run: |
