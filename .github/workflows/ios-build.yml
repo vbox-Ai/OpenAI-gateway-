@@ -239,13 +239,16 @@ jobs:
               t.build_configurations.each do |c|
                 base = c.build_settings['OTHER_LDFLAGS']
                 base = '\$(inherited)' if base.nil? || base.empty?
-                # dead_strip 是 section 级消除，force_load 只保证 .a 进入链接，
-                # 必须 -u 把符号标记为未解析引用，强制保留 start 及其级联依赖
-                c.build_settings['OTHER_LDFLAGS'] = base + ' -Wl,-force_load,' + rust_lib + ' -Wl,-u,_agent2api_server_start -Wl,-u,_agent2api_server_stop -Wl,-u,_agent2api_server_ping'
+                # build39 验证：**不用 force_load**，改用 -u 标记 FFI 符号为未解析
+                # 引用，让链接器按需从 .a 拉取符号（而不是强拉全部 .o）。
+                # build35 用 force_load 时闪退、build38 不用（且 providers 被裁）
+                # 不闪，怀疑 force_load 把 providers 的全部 .o 塞进 Runner 破坏了
+                # Flutter.framework 的加载。改用按需链接验证这个假设。
+                c.build_settings['OTHER_LDFLAGS'] = base + ' ' + rust_lib + ' -Wl,-u,_agent2api_server_start -Wl,-u,_agent2api_server_stop -Wl,-u,_agent2api_server_ping'
               end
             end
             project.save
-            puts 'force_load + -u injected'
+            puts 'archive + -u injected (no force_load)'
           "
 
       - name: 构建 iOS App（xcodebuild 直连，避开 pod 重装重置 OTHER_LDFLAGS）

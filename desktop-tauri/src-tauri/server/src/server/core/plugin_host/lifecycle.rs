@@ -99,9 +99,8 @@ impl Host {
         *self.inner.lock().await = None;
 
         // ── 执行体启动：iOS 进程内 / 其它平台 spawn ──────────────
-        // A/B 验证（build36）：临时禁用进程内分支（cfg(any()) 恒 false），
-        // 让 iOS 也走 spawn，确认闪退是否由 providers 依赖导致。验证后恢复。
-        #[cfg(any())]
+        // build39：恢复进程内分支 + 改用按需链接（去掉 force_load）验证假设。
+        #[cfg(target_os = "ios")]
         let run = {
             // iOS 沙箱禁止 spawn 子进程，走进程内：duplex 内存管道 + serve_inprocess。
             // 两对管道：网关→插件（写端 gw_to_plugin / 读端 serve_reader），
@@ -147,7 +146,7 @@ impl Host {
             run
         };
 
-        // A/B 验证：spawn 分支无条件生效（进程内分支已用 cfg(any()) 禁用）。
+        #[cfg(not(target_os = "ios"))]
         let run = {
             let mut command = tokio::process::Command::new(&self.options.exe);
             command.args(&self.options.args)
