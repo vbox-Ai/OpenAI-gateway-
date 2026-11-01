@@ -162,10 +162,17 @@ jobs:
           echo "signed agent2api-providers"
 
           # ── 2) agent2api-web-providers（网页提供商）────────────────────
+          # vbox fork 只有 web-v3.3.0-beta.5.1 tag，版本低于网关 beta.6 会被判
+          # 「需要补齐插件」。优先用上游 Agent2WebProviders 的 v3.3.0-beta.6
+          # （协议同版本），回退 vbox 的 web-v3.3.0-beta.5.1，再兜底 main。
           mkdir -p "$RUNNER_TEMP/web"
-          git clone --depth 1 https://github.com/vbox-Ai/OpenAI-web-.git "$RUNNER_TEMP/web"
+          git clone --depth 1 --branch v3.3.0-beta.6 \
+            https://github.com/ProvidersPlugin/Agent2WebProviders.git "$RUNNER_TEMP/web" 2>/dev/null \
+            || git clone --depth 1 https://github.com/vbox-Ai/OpenAI-web-.git "$RUNNER_TEMP/web"
           cd "$RUNNER_TEMP/web"
-          git checkout web-v3.3.0-beta.5.1 2>/dev/null || git checkout main 2>/dev/null || true
+          git checkout v3.3.0-beta.6 2>/dev/null \
+            || git checkout web-v3.3.0-beta.5.1 2>/dev/null \
+            || git checkout main 2>/dev/null || true
           cargo build --release --target aarch64-apple-ios --bin agent2api-web-providers
           ldid -S"$ENT" "target/aarch64-apple-ios/release/agent2api-web-providers"
           echo "signed agent2api-web-providers"

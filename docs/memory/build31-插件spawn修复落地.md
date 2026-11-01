@@ -107,3 +107,51 @@ build33 与 build31 崩溃完全一致：`LaunchEngine.acquireEngine()` → `abo
 1. 网关 plugin_host 加进程内分支（iOS 用 duplex + serve_inprocess 替代 spawn）
 2. iOS 构建把 providers 静态库链进 Runner
 3. 真机验证 WorkBuddy 实际转发
+
+---
+
+## 十、⭐ 最终解法：`-force_load` 是闪退元凶（2026-11-01 真机验证通过）
+
+### 问题定位过程（build33 → build39）
+
+进程内方案落地后连续闪退（build33/34/35），崩溃点始终是
+`LaunchEngine.acquireEngine()` → `abort()`，发生在我们任何 Rust 代码执行之前。
+多轮 A/B 验证后找到真因：
+
+| build | providers 在二进制 | 链接方式 | ipa 大小 | 结果 |
+|---|---|---|---|---|
+| build35 | ✅ 在（+486KB） | `-force_load` | 32.48MB | ❌ 闪退 |
+| build38 | ❌ 不在（dead-code 裁掉） | 无 force_load | 31.99MB | ✅ 启动（但插件不可用） |
+| **build39** | **✅ 在（+483KB）** | **按需链接（`-u` 符号）** | **32.47MB** | **✅ 不闪退 + 插件可用** |
+
+### 根因
+
+**`-Wl,-force_load,libagent2api_server.a` 会把静态库里的所有目标文件强制加载进
+Runner**。加入 providers（486KB 代码 + 依赖）后，强制加载破坏了
+Flutter.framework 的动态链接/初始化，导致引擎 `acquireEngine` abort。
+
+### 修复
+
+iOS workflow 的 `OTHER_LDFLAGS` 去掉 `-force_load`，只保留 `-u` 符号引用：
+
+```diff
+- -Wl,-force_load,<lib.a> -Wl,-u,_agent2api_server_start ...
++ <lib.a> -Wl,-u,_agent2api_server_start -Wl,-u,_agent2api_server_stop -Wl,-u,_agent2api_server_ping
+```
+
+`-u` 已足以保证 FFI 符号及其级联依赖不被 dead-strip 剥掉，无需 force_load。
+
+### 真机验证结果（build39）
+
+- ✅ 不闪退，面板正常
+- ✅ 插件页显示「**运行中 · 已加载 3 家**」（workbuddy + workbuddy-intl + raccoon）
+- ✅ 添加账号成功（WorkBuddy / 小浣熊两个平台可选）
+- ✅ API 接口实测可用（`/v1/chat/completions` 转发到上游成功）
+
+### 完整链路
+
+```
+iOS App(Flutter) → 进程内网关(Rust, 静态库) → 进程内 serve(providers, 内存管道) → 上游 API
+```
+
+**全程无 spawn、无 entitlements 改动、普通沙箱即可运行。**
