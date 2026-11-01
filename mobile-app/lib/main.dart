@@ -90,6 +90,63 @@ class _WebUiPageState extends State<WebUiPage> {
   /// webview 句柄（弹窗兜底导航用）
   InAppWebViewController? _web;
 
+  /// UI 缩放比例（1.0 = 100%）。手机屏窄、表格列多，用户可逐档放大查看。
+  ///
+  /// ── 为什么用 CSS zoom 而不是 webview 原生缩放 ───────────────────
+  /// `supportZoom: true` 只给手指捏合，且与页面 `100vh` 布局打架（放大后
+  /// 侧栏被裁掉）。这里给 `<html>` 设 CSS `zoom`：整页按比例重排，布局不变形，
+  /// 且能由界面上的按钮精确控制档位。
+  double _zoom = 1.0;
+
+  /// 可选档位（点按钮循环切换）。
+  static const List<double> _zoomSteps = [0.8, 1.0, 1.15, 1.3, 1.5];
+
+  /// 把当前缩放应用到页面（`zoom` 是 CSS 属性，WKWebView 全版本支持）。
+  Future<void> _applyZoom() async {
+    final controller = _web;
+    if (controller == null) return;
+    await controller.evaluateJavascript(
+      source: "document.documentElement.style.zoom = '${_zoom.toStringAsFixed(2)}';",
+    );
+  }
+
+  /// 循环切到下一档缩放。
+  void _cycleZoom() {
+    final index = _zoomSteps.indexOf(_zoom);
+    final next = index < 0 ? 1 : (index + 1) % _zoomSteps.length;
+    setState(() => _zoom = _zoomSteps[next]);
+    _applyZoom();
+    _saveZoom();
+  }
+
+  /// 缩放档位落盘（跨启动记忆）。用数据目录下一个纯文本文件，
+  /// 不引入 shared_preferences（少一个原生插件依赖）。
+  Future<void> _saveZoom() async {
+    try {
+      final dir = await _resolveDataDir();
+      await File('${dir.path}/ui-zoom.txt')
+          .writeAsString(_zoom.toStringAsFixed(2), flush: true);
+    } catch (_) {
+      // 记忆是可选的，失败不影响使用
+    }
+  }
+
+  /// 读取上次的缩放档位（读不到就用 100%）。
+  Future<void> _loadZoom() async {
+    try {
+      final dir = await _resolveDataDir();
+      final file = File('${dir.path}/ui-zoom.txt');
+      if (!await file.exists()) return;
+      final value = double.tryParse((await file.readAsString()).trim());
+      if (value == null || value < 0.5 || value > 3.0) return;
+      if (!mounted) return;
+      setState(() => _zoom = value);
+      await _applyZoom();
+    } catch (_) {
+      // 忽略，保持默认
+    }
+  }
+
   /// 注入到页面之前的弹窗桥：把 window.open / target=_blank 交给原生打开。
   ///
   /// WKWebView 只有在实现 `WKUIDelegate createWebViewWith` 时才支持新窗口，
@@ -194,6 +251,8 @@ class _WebUiPageState extends State<WebUiPage> {
   @override
   void initState() {
     super.initState();
+    // 先读取上次的缩放档位（webview 起来后 onLoadStop 会套用）。
+    _loadZoom();
     _setup();
   }
 
@@ -526,6 +585,8 @@ class _WebUiPageState extends State<WebUiPage> {
                       onLoadStop: (controller, url) {
                         if (!mounted) return;
                         setState(() => _barVisible = false);
+                        // 每次页面加载/刷新后重新套用缩放档位（SPA 重绘也会丢）。
+                        _applyZoom();
                       },
                       onConsoleMessage: (controller, message) {
                         // 不直接比枚举值：不同版本 ConsoleMessageLevel 的大小写
@@ -673,6 +734,64 @@ class _WebUiPageState extends State<WebUiPage> {
                                   ),
                                 ),
                             ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          // ── UI 缩放按钮（右下角悬浮）─────────────────────────────
+          // 手机屏窄、表格列多，点一下循环 80% → 100% → 115% → 130% → 150%。
+          // 常驻显示但半透明，不挡内容；档位跨启动记忆（ui-zoom.txt）。
+          if (_ready)
+            Positioned(
+              right: 10,
+              bottom: 10,
+              child: SafeArea(
+                top: false,
+                left: false,
+                child: GestureDetector(
+                  onTap: _cycleZoom,
+                  onLongPress: () {
+                    // 长按复位到 100%
+                    setState(() => _zoom = 1.0);
+                    _applyZoom();
+                    _saveZoom();
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 6,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xCC1B1E24),
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(color: const Color(0x44FFFFFF)),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Color(0x55000000),
+                          blurRadius: 6,
+                          offset: Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.zoom_in,
+                          size: 14,
+                          color: Color(0xFFB9BEC7),
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          '${(_zoom * 100).round()}%',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
                           ),
                         ),
                       ],
