@@ -123,11 +123,26 @@ impl Host {
 
             // serve_inprocess 阻塞直到 EOF/shutdown，跑在独立 task 里。
             // 它的退出通过「写端 drop → 网关读 EOF」传导给 read_loop，这里只防泄漏。
+            //
+            // 按包分派：进程内模式一个二进制里只能编进一个 providers crate，
+            // 当前只把 `agent2api-providers`（30 家原生 provider）编了进来。
+            // `agent2api-web-providers`（2 家网页 provider）的仓库还没有
+            // serve_inprocess 入口，这里明确报错而不是让它误跑 providers 的清单。
+            let pack_is_web = self.options.data_dir.contains("agent2api-web-providers");
             tokio::spawn(async move {
-                let result = agent2api_providers::serve_inprocess(
-                    Box::new(serve_reader),
-                    Box::new(serve_writer),
-                ).await;
+                // 按包分派到各自的 serve_inprocess：两个包是两个不同的 crate，
+                // 各有自己的 registry()（providers 30 家 / web 2 家）。
+                let result = if pack_is_web {
+                    agent2api_web_providers::serve_inprocess(
+                        Box::new(serve_reader),
+                        Box::new(serve_writer),
+                    ).await
+                } else {
+                    agent2api_providers::serve_inprocess(
+                        Box::new(serve_reader),
+                        Box::new(serve_writer),
+                    ).await
+                };
                 if let Err(error) = &result {
                     crate::server::logging::log("Plugin", &format!("进程内 provider 宿主退出：{error}"));
                 }
