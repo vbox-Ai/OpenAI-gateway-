@@ -168,11 +168,13 @@ ed25519-dalek = { version = "2", default-features = false, features = ["fast", "
 # 应打 tag 并改用 tag 引用，避免依赖会动的分支。
 #
 # iOS 进程内嵌入：两个插件包都编成静态库链进网关。
-# - agent2api-providers：30 家原生 provider（当前只开 workbuddy+raccoon 验证）
+# - agent2api-providers：全部 23 家原生 provider（features=["all"]，不含 bin）
 # - agent2api-web-providers：网页 provider（chatglm 智谱清言 + deepseek 网页版）
 # 依赖 vbox fork 的 poc-inprocess 分支（含 serve_inprocess 入口）。
+# Windows-only 的部分（DPAPI / kuku 引擎 DLL）在源码里已用 cfg(windows) 隔离，
+# iOS 上走桩实现，不影响编译。
 [target.'cfg(target_os = "ios")'.dependencies]
-agent2api-providers = { git = "https://github.com/vbox-Ai/OpenAI-", branch = "poc-inprocess", default-features = false, features = ["workbuddy", "raccoon"] }
+agent2api-providers = { git = "https://github.com/vbox-Ai/OpenAI-", branch = "poc-inprocess", default-features = false, features = ["all"] }
 agent2api-web-providers = { git = "https://github.com/vbox-Ai/OpenAI-web-", branch = "poc-inprocess", default-features = false, features = ["chatglm", "deepseek"] }
 
 # AutoClaw 凭证解密的 DPAPI（providers/autoclaw/crypto.rs）。仅 Windows
